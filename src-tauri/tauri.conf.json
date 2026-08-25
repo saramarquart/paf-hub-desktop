@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Planet A Foods",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "com.planetafoods.hub",
   "build": {
     "frontendDist": "../src"
@@ -31,7 +31,7 @@
     "targets": "all",
     "category": "Productivity",
     "shortDescription": "Planet A Foods app hub",
-    "longDescription": "Native launcher for the Planet A Foods app hub. Opens the hub in its own window and keeps you inside one app as you move between the internal tools — QOaroma (aroma & formulation analytics), paf_note (wiki, notes & OKRs), paf_feedback (team feedback & HR), paf_commodity (cocoa & FX prices) and paf_coa (certificates of analysis). Third-party SaaS tiles open in your default browser.",
+    "longDescription": "Native launcher for the Planet A Foods app hub. Opens the hub in its own window and keeps you inside one app as you move between the internal tools \u2014 QOaroma (aroma & formulation analytics), paf_note (wiki, notes & OKRs), paf_feedback (team feedback & HR), paf_commodity (cocoa & FX prices) and paf_coa (certificates of analysis). Third-party SaaS tiles open in your default browser.",
     "publisher": "Planet A Foods",
     "icon": [
       "icons/32x32.png",
