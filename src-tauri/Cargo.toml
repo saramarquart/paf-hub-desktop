@@ -18,7 +18,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# NOTE: the `unstable` feature is REQUIRED for the multi-webview tab support.
+# It unlocks `WindowBuilder`/`Window` (a bare window we attach children to),
+# `Window::add_child`, and the `WebviewBuilder`/`Webview` multiwebview APIs used
+# by src/lib.rs. Without it the crate will not expose those symbols and the
+# build fails. This changes the build (opt-in to Tauri's unstable API surface).
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
