@@ -1,10 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Chrome tab-strip webview: local page that drives tabs over IPC (invoke + events). core:default already bundles the event and webview core permissions the strip needs.",
   "windows": ["main"],
+  "webviews": ["chrome"],
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:default"
   ]
 }

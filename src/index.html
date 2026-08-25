@@ -3,28 +3,168 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Planet A Foods</title>
+    <title>Planet A Foods — Tabs</title>
     <style>
-      html, body { margin: 0; height: 100%; background: #0f1b2d; color: #e4eaf5;
-        font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
-      .wrap { height: 100%; display: flex; flex-direction: column;
-        align-items: center; justify-content: center; gap: 1rem; text-align: center; }
-      .t { font-size: 1.4rem; font-weight: 600; letter-spacing: .01em; }
-      .s { opacity: .7; font-size: .95rem; max-width: 24rem; line-height: 1.5; }
-      a { color: #8fb7ff; }
+      :root {
+        --bg: #0f1b2d;
+        --bg-strip: #0c1626;
+        --pill: #1b2c46;
+        --pill-active: #274168;
+        --pill-hover: #223a5c;
+        --text: #e4eaf5;
+        --text-dim: #9db0cf;
+        --accent: #8fb7ff;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg-strip);
+        color: var(--text);
+        font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      /* The whole strip. Full width, fills the ~44px webview. */
+      #strip {
+        display: flex;
+        align-items: center;
+        height: 100%;
+        padding: 0 6px;
+        gap: 4px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+      }
+      #strip::-webkit-scrollbar { height: 0; }
+      #tabs {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow-x: auto;
+      }
+      #tabs::-webkit-scrollbar { height: 0; }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        height: 30px;
+        max-width: 220px;
+        min-width: 80px;
+        padding: 0 8px 0 12px;
+        border-radius: 8px;
+        background: var(--pill);
+        color: var(--text-dim);
+        cursor: default;
+        flex: 0 1 auto;
+        transition: background 0.12s ease, color 0.12s ease;
+      }
+      .pill:hover { background: #223a5c; color: var(--text); }
+      .pill.active {
+        background: var(--pill-active);
+        color: var(--text);
+      }
+      .pill .title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      .pill .close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        font-size: 14px;
+        line-height: 1;
+        color: var(--text-dim);
+        flex: 0 0 auto;
+      }
+      .pill .close:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+      #newtab {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        font-size: 20px;
+        line-height: 1;
+        color: var(--text-dim);
+        flex: 0 0 auto;
+        cursor: default;
+      }
+      #newtab:hover { background: #223a5c; color: #fff; }
     </style>
   </head>
   <body>
-    <!-- The window is configured (tauri.conf.json) to load the hosted hub directly.
-         This page only appears if the hub can't be reached (e.g. offline). -->
-    <div class="wrap">
-      <div class="t">Planet A Foods</div>
-      <div class="s">
-        Couldn't reach the Planet A Foods hub. Check your internet connection, then
-        reopen the app — or open
-        <a href="https://hub.planet-a-foods.com/">hub.planet-a-foods.com</a>
-        in your browser.
-      </div>
+    <div id="strip">
+      <div id="tabs"></div>
+      <div id="newtab" title="New tab (⌘T / Ctrl+T)">+</div>
     </div>
+
+    <script>
+      // The chrome strip runs with withGlobalTauri:true, so the core API is on
+      // window.__TAURI__. We only need invoke + event.listen.
+      const invoke = window.__TAURI__.core.invoke;
+      const listen = window.__TAURI__.event.listen;
+
+      const tabsEl = document.getElementById("tabs");
+      const newTabEl = document.getElementById("newtab");
+
+      function render(state) {
+        const active = state.active;
+        tabsEl.textContent = "";
+        for (const tab of state.tabs) {
+          const pill = document.createElement("div");
+          pill.className = "pill" + (tab.id === active ? " active" : "");
+          pill.dataset.id = String(tab.id);
+          pill.title = tab.title || "";
+
+          const title = document.createElement("span");
+          title.className = "title";
+          title.textContent = tab.title && tab.title.trim() ? tab.title : "New Tab";
+          pill.appendChild(title);
+
+          const close = document.createElement("span");
+          close.className = "close";
+          close.textContent = "✕"; // ✕
+          close.title = "Close tab (⌘W / Ctrl+W)";
+          close.addEventListener("click", (e) => {
+            e.stopPropagation();
+            invoke("cmd_close_tab", { id: tab.id });
+          });
+          pill.appendChild(close);
+
+          // Left click selects; middle click closes (browser convention).
+          pill.addEventListener("click", () => {
+            invoke("cmd_select_tab", { id: tab.id });
+          });
+          pill.addEventListener("auxclick", (e) => {
+            if (e.button === 1) {
+              e.preventDefault();
+              invoke("cmd_close_tab", { id: tab.id });
+            }
+          });
+          tabsEl.appendChild(pill);
+        }
+      }
+
+      newTabEl.addEventListener("click", () => invoke("cmd_new_tab"));
+
+      // Rust pushes a fresh snapshot after every change.
+      listen("tabs:state", (event) => render(event.payload));
+
+      // Pull the initial state on load (covers the race where the first tab was
+      // created before this page finished loading / registered its listener).
+      invoke("get_tabs").then(render).catch(() => {});
+    </script>
   </body>
 </html>
