@@ -99,3 +99,28 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # --- macOS .pkg for MDM deployment ---------------------------------------
+      # Tauri emits .app + .dmg but no .pkg. MDMs (Jamf/Kandji/Mosyle/Intune)
+      # deploy a .pkg to /Applications silently, and — because MDM-managed
+      # installs don't set com.apple.quarantine — the Gatekeeper prompt our
+      # self-signed .app triggers on manual download does NOT appear. So we wrap
+      # the freshly-built universal .app with `productbuild` and attach the .pkg
+      # to the same release. It is UNSIGNED (no Developer ID Installer cert);
+      # supervised MDM installs accept that. To sign later, set a
+      # `Developer ID Installer` cert and add `--sign "<identity>"`.
+      - name: Build macOS .pkg (MDM)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APP=$(find src-tauri/target -type d -name "Planet A Foods.app" -path "*bundle/macos*" | head -n1)
+          if [ -z "$APP" ]; then echo "::error::built .app not found"; exit 1; fi
+          echo "Wrapping: $APP"
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          PKG="Planet-A-Foods_${VERSION}_universal.pkg"
+          productbuild --component "$APP" /Applications "$PKG"
+          echo "Built $PKG"
+          gh release upload "$GITHUB_REF_NAME" "$PKG" --clobber
