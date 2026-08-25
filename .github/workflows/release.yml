@@ -1,0 +1,101 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+# CI then builds the macOS .dmg and Windows .exe/.msi and attaches them to a
+# GitHub Release for download. workflow_dispatch allows a manual test build.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest      # universal .dmg (Apple Silicon + Intel)
+            args: "--target universal-apple-darwin"
+          - platform: windows-latest    # .exe (NSIS) + .msi
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install frontend deps
+        run: npm install
+
+      # --- Windows code signing -------------------------------------------------
+      # If the two repo secrets below are set, import the self-signed .pfx into the
+      # runner's certificate store and tell Tauri to sign with it (by thumbprint).
+      # See SIGNING.md for how to create the cert and add the secrets. When the
+      # secrets are absent, the step is skipped and Windows builds ship unsigned.
+      - name: Import Windows signing certificate
+        id: winsign
+        if: matrix.platform == 'windows-latest' && env.WINDOWS_CERT_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "code-signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_BASE64))
+          $pwd = ConvertTo-SecureString -String $env:WINDOWS_CERT_PASSWORD -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $pwd
+          "thumbprint=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Remove-Item $pfxPath -Force
+
+      - name: Build app + publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri picks up this env var and signs the NSIS/MSI bundle with the
+          # imported cert. Empty on macOS / when no cert secret is configured.
+          TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.winsign.outputs.thumbprint }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Planet A Foods ${{ github.ref_name }}"
+          releaseBody: |
+            **Planet A Foods** — the native app hub. One window that launches all
+            the internal tools (QOaroma, paf_note, paf_feedback, paf_commodity,
+            paf_coa) and keeps you inside a single app as you move between them.
+
+            **Downloads below:** `.dmg` for macOS, `.exe` (or `.msi`) for Windows.
+
+            ---
+
+            ### Install — macOS
+            1. Open the `.dmg` and drag **Planet A Foods** to **Applications**.
+            2. One-time unlock (the app is self-signed, not Apple-notarized):
+               open **Terminal** and run
+               `xattr -dr com.apple.quarantine "/Applications/Planet A Foods.app"`
+               then open the app normally. (IT can also push this step, or the
+               trusted cert, to managed Macs — see SIGNING.md.)
+
+            ### Install — Windows
+            - Run the `.exe`. On machines where IT has trusted our code-signing
+              certificate, it installs **without any SmartScreen prompt**.
+            - On a machine that hasn't trusted the cert yet, click **More info →
+              Run anyway** on the SmartScreen prompt (one time). See SIGNING.md.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Planet A Foods</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0f1b2d; color: #e4eaf5;
+        font-family: -apple-system, "Segoe UI", system-ui, sans-serif; }
+      .wrap { height: 100%; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 1rem; text-align: center; }
+      .t { font-size: 1.4rem; font-weight: 600; letter-spacing: .01em; }
+      .s { opacity: .7; font-size: .95rem; max-width: 24rem; line-height: 1.5; }
+      a { color: #8fb7ff; }
+    </style>
+  </head>
+  <body>
+    <!-- The window is configured (tauri.conf.json) to load the hosted hub directly.
+         This page only appears if the hub can't be reached (e.g. offline). -->
+    <div class="wrap">
+      <div class="t">Planet A Foods</div>
+      <div class="s">
+        Couldn't reach the Planet A Foods hub. Check your internet connection, then
+        reopen the app — or open
+        <a href="https://hub.planet-a-foods.com/">hub.planet-a-foods.com</a>
+        in your browser.
+      </div>
+    </div>
+  </body>
+</html>
