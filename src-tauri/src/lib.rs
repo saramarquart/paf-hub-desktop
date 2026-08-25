@@ -36,6 +36,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Url,
     WebviewUrl, Window, WindowEvent, Wry,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// The hub start page every new tab opens.
@@ -63,6 +64,115 @@ fn is_external_host(host: &str) -> bool {
 /// Webview label for a content tab with the given numeric id.
 fn content_label(id: u32) -> String {
     format!("content-{id}")
+}
+
+/// Hosts whose sign-in must be routed through the SYSTEM BROWSER so the OS
+/// passkey / WebAuthn ceremony works (embedded webviews can't do it). These are
+/// the apps that expose the desktop-auth handoff endpoints (`/desktop-login`,
+/// `/api/desktop-auth/start` + `/exchange`). Add a host here once its server
+/// side ships the handoff. paf_note is proven first; the rest follow.
+const DESKTOP_AUTH_HOSTS: &[&str] = &["note.planet-a-foods.com"];
+
+/// Does `host` expose the desktop-auth handoff endpoints?
+fn supports_desktop_auth(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    DESKTOP_AUTH_HOSTS.iter().any(|h| host == *h)
+}
+
+/// The content webview of the currently-active tab, if any.
+fn active_content_webview(app: &AppHandle) -> Option<tauri::webview::Webview<Wry>> {
+    let active = {
+        let mgr = app.state::<Mutex<TabManager>>();
+        let active = mgr.lock().unwrap().active;
+        active
+    }?;
+    app.get_webview(&content_label(active))
+}
+
+/// Kick off a passkey-capable login for `host` by opening its `/desktop-login`
+/// bridge page in the user's DEFAULT BROWSER. The browser does the Google +
+/// passkey sign-in, then the server 302-redirects to `planetafoods://auth?…`,
+/// which `handle_deep_link` catches and redeems back into the app's webview.
+fn open_browser_login(app: &AppHandle, host: &str) {
+    let url = format!("https://{host}/desktop-login");
+    let _ = app.opener().open_url(url, None::<String>);
+}
+
+/// Manual "Sign in via browser" trigger (menu). Uses the active tab's host when
+/// it's a desktop-auth app, else falls back to the first configured host.
+fn browser_login_active(app: &AppHandle) {
+    let host = active_content_webview(app)
+        .and_then(|v| v.url().ok())
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .filter(|h| supports_desktop_auth(h))
+        .unwrap_or_else(|| DESKTOP_AUTH_HOSTS[0].to_string());
+    open_browser_login(app, &host);
+}
+
+/// Redeem a `planetafoods://auth?token=…&origin=…` deep link.
+///
+/// The system browser sends us here after a passkey login. `token` is a
+/// single-use, 60s, HMAC-signed handoff; `origin` names the server that minted
+/// it (and is the ONLY server that can redeem it). We navigate the active tab's
+/// webview to `${origin}/api/desktop-auth/exchange?token=…`, which sets the
+/// session cookie IN THIS WEBVIEW and 302s to `/` — the user is now logged in.
+///
+/// We navigate via `location.replace` (engine-level eval) rather than reloading
+/// so the exchange URL never lands in history. The token is percent-encoded by
+/// `Url`'s query serializer, so it survives intact.
+fn handle_deep_link(app: &AppHandle, url: &Url) {
+    if url.scheme() != "planetafoods" {
+        return;
+    }
+    // planetafoods://auth?token=…&origin=… — host is "auth".
+    if url.host_str() != Some("auth") {
+        return;
+    }
+
+    let mut token: Option<String> = None;
+    let mut origin: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "token" => token = Some(v.into_owned()),
+            "origin" => origin = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+
+    let Some(token) = token else {
+        return;
+    };
+    // Default to paf_note for older server builds that don't send `origin`.
+    let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
+
+    // Build the exchange URL with proper percent-encoding of the token.
+    let Ok(mut exchange) = Url::parse(&format!(
+        "{}/api/desktop-auth/exchange",
+        origin.trim_end_matches('/')
+    )) else {
+        return;
+    };
+    exchange.query_pairs_mut().append_pair("token", &token);
+
+    // Only ever redeem against one of our own apps. Anchor to a subdomain
+    // boundary so `evilplanet-a-foods.com` can't slip through.
+    let host_ok = exchange
+        .host_str()
+        .map(|h| {
+            let h = h.trim_end_matches('.').to_ascii_lowercase();
+            h == "planet-a-foods.com" || h.ends_with(".planet-a-foods.com")
+        })
+        .unwrap_or(false);
+    if exchange.scheme() != "https" || !host_ok {
+        return;
+    }
+
+    if let Some(view) = active_content_webview(app) {
+        // serde_json produces a correctly-escaped JS string literal.
+        if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
+            let _ = view.eval(&format!("window.location.replace({js_url});"));
+        }
+    }
 }
 
 /// One tab: its stable numeric id and its last-seen document title.
@@ -198,6 +308,14 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
                         let _ = handle_nav
                             .opener()
                             .open_url(url.as_str(), None::<String>);
+                        return false;
+                    }
+                    // Passkey login can't run in an embedded webview. When one of
+                    // our apps would show its sign-in page, cancel that in-window
+                    // navigation and open the app's /desktop-login in the SYSTEM
+                    // browser instead; the deep link brings the session back.
+                    if supports_desktop_auth(host) && url.path() == "/signin" {
+                        open_browser_login(&handle_nav, host);
                         return false;
                     }
                 }
@@ -433,6 +551,7 @@ fn cmd_close_tab(app: AppHandle, id: u32) {
 /// so both `Builder::on_menu_event` and any future per-window menu share it.
 fn handle_menu(app: &AppHandle, menu_id: &str) {
     match menu_id {
+        "auth_login" => browser_login_active(app),
         "tab_new" => new_tab(app),
         "tab_close" => close_active_tab(app),
         "tab_next" | "tab_next_alt" => cycle_tab(app, 1),
@@ -455,11 +574,23 @@ fn handle_menu(app: &AppHandle, menu_id: &str) {
 /// focus.
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // App submenu (gives macOS its Hide/Quit; ⌘Q via PredefinedMenuItem::quit).
+    // "Sign in via browser" opens the active app's passkey login in the system
+    // browser — a manual fallback if the automatic /signin interception is ever
+    // missed (and a discoverable way to (re)authenticate on demand).
+    let login_item = MenuItem::with_id(
+        app,
+        "auth_login",
+        "Sign in via browser",
+        true,
+        Some("CmdOrCtrl+L"),
+    )?;
     let app_menu = Submenu::with_items(
         app,
         "Planet A Foods",
         true,
         &[
+            &login_item,
+            &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::hide(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::quit(app, None)?,
@@ -549,6 +680,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
         .manage(Mutex::new(TabManager::default()))
         .invoke_handler(tauri::generate_handler![
             get_tabs,
@@ -597,6 +729,23 @@ pub fn run() {
                 Position::Logical(LogicalPosition::new(0.0, 0.0)),
                 Size::Logical(LogicalSize::new(w, CHROME_HEIGHT)),
             )?;
+
+            // Route the passkey-login deep link. The system browser 302s to
+            // `planetafoods://auth?token=…&origin=…` after sign-in; redeem it
+            // into the active tab's webview. Covers both the running-app case
+            // and (via get_current) a cold start launched by the deep link.
+            let dl_handle = handle.clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    handle_deep_link(&dl_handle, &url);
+                }
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                let cold_handle = handle.clone();
+                for url in urls {
+                    handle_deep_link(&cold_handle, &url);
+                }
+            }
 
             // Open the first tab.
             new_tab(&handle);

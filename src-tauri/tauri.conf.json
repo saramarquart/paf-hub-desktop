@@ -6,6 +6,13 @@
   "build": {
     "frontendDist": "../src"
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["planetafoods"]
+      }
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
