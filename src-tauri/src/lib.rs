@@ -27,6 +27,8 @@
 // focus — so ⌘T/⌘W/⌘1-9 are wired as menu items with accelerators, and their
 // events drive the tab manager.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -94,8 +96,17 @@ fn active_content_webview(app: &AppHandle) -> Option<tauri::webview::Webview<Wry
 /// passkey sign-in, then the server 302-redirects to `planetafoods://auth?…`,
 /// which `handle_deep_link` catches and redeems back into the app's webview.
 fn open_browser_login(app: &AppHandle, host: &str) {
-    let url = format!("https://{host}/desktop-login");
-    let _ = app.opener().open_url(url, None::<String>);
+    let port = { app.state::<LoopbackPort>().0 };
+    let Ok(mut url) = Url::parse(&format!("https://{host}/desktop-login")) else {
+        return;
+    };
+    // Prefer the loopback callback: the server redirects the token straight to
+    // our local http server. Falls back to the deep link only if we couldn't bind.
+    if port != 0 {
+        url.query_pairs_mut()
+            .append_pair("cb", &format!("http://127.0.0.1:{port}/callback"));
+    }
+    let _ = app.opener().open_url(url.as_str(), None::<String>);
 }
 
 /// Manual "Sign in via browser" trigger (menu). Uses the active tab's host when
@@ -109,53 +120,29 @@ fn browser_login_active(app: &AppHandle) {
     open_browser_login(app, &host);
 }
 
-/// Redeem a `planetafoods://auth?token=…&origin=…` deep link.
+/// Ephemeral port of the loopback OAuth-callback server (managed state). 0 means
+/// the server failed to bind and only the deep-link fallback is available.
+struct LoopbackPort(u16);
+
+/// Redeem a handoff `token` (minted by `origin`) into the app: bring the window
+/// to the front and navigate the active tab's webview to
+/// `${origin}/api/desktop-auth/exchange?token=…`, which sets the session cookie
+/// IN THIS WEBVIEW and lands on `/` — the user is now logged in. Shared by BOTH
+/// the loopback-callback path (primary) and the deep-link path (fallback).
 ///
-/// The system browser sends us here after a passkey login. `token` is a
-/// single-use, 60s, HMAC-signed handoff; `origin` names the server that minted
-/// it (and is the ONLY server that can redeem it). We navigate the active tab's
-/// webview to `${origin}/api/desktop-auth/exchange?token=…`, which sets the
-/// session cookie IN THIS WEBVIEW and 302s to `/` — the user is now logged in.
-///
-/// We navigate via `location.replace` (engine-level eval) rather than reloading
-/// so the exchange URL never lands in history. The token is percent-encoded by
-/// `Url`'s query serializer, so it survives intact.
-fn handle_deep_link(app: &AppHandle, url: &Url) {
-    if url.scheme() != "planetafoods" {
-        return;
-    }
-    // planetafoods://auth?token=…&origin=… — host is "auth".
-    if url.host_str() != Some("auth") {
-        return;
-    }
-
-    let mut token: Option<String> = None;
-    let mut origin: Option<String> = None;
-    for (k, v) in url.query_pairs() {
-        match k.as_ref() {
-            "token" => token = Some(v.into_owned()),
-            "origin" => origin = Some(v.into_owned()),
-            _ => {}
-        }
-    }
-
-    let Some(token) = token else {
-        return;
-    };
-    // Default to paf_note for older server builds that don't send `origin`.
-    let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
-
-    // Build the exchange URL with proper percent-encoding of the token.
+/// We navigate via `location.replace` (engine-level eval) so the exchange URL
+/// never lands in history; the token is percent-encoded by `Url`, surviving
+/// intact. We only ever redeem against one of our own `*.planet-a-foods.com`
+/// hosts (subdomain-anchored) over https.
+fn redeem_into_app(app: &AppHandle, token: &str, origin: &str) {
     let Ok(mut exchange) = Url::parse(&format!(
         "{}/api/desktop-auth/exchange",
         origin.trim_end_matches('/')
     )) else {
         return;
     };
-    exchange.query_pairs_mut().append_pair("token", &token);
+    exchange.query_pairs_mut().append_pair("token", token);
 
-    // Only ever redeem against one of our own apps. Anchor to a subdomain
-    // boundary so `evilplanet-a-foods.com` can't slip through.
     let host_ok = exchange
         .host_str()
         .map(|h| {
@@ -167,11 +154,88 @@ fn handle_deep_link(app: &AppHandle, url: &Url) {
         return;
     }
 
+    // Bring the app forward so the user lands back in it after the browser step.
+    if let Some(win) = app.get_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+
     if let Some(view) = active_content_webview(app) {
-        // serde_json produces a correctly-escaped JS string literal.
         if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
             let _ = view.eval(&format!("window.location.replace({js_url});"));
         }
+    }
+}
+
+/// Deep-link FALLBACK path: `planetafoods://auth?token=…&origin=…`. Used only
+/// when the loopback server couldn't bind. Parses and delegates to `redeem_into_app`.
+fn handle_deep_link(app: &AppHandle, url: &Url) {
+    if url.scheme() != "planetafoods" || url.host_str() != Some("auth") {
+        return;
+    }
+    let mut token: Option<String> = None;
+    let mut origin: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "token" => token = Some(v.into_owned()),
+            "origin" => origin = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    let Some(token) = token else { return };
+    let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
+    redeem_into_app(app, &token, &origin);
+}
+
+/// Handle one loopback HTTP connection. The system browser hits
+/// `http://127.0.0.1:<port>/callback?token=…&origin=…` (a plain http redirect it
+/// always follows — no custom scheme, so this works even on quarantined installs
+/// where `planetafoods://` is unregistered). We parse the token, reply with a
+/// tiny "you can close this tab" page, then redeem into the app.
+fn handle_loopback(app: &AppHandle, stream: &mut std::net::TcpStream) {
+    let mut buf = [0u8; 8192];
+    let n = stream.read(&mut buf).unwrap_or(0);
+    let req = String::from_utf8_lossy(&buf[..n]);
+    // First request line: "GET /callback?token=…&origin=… HTTP/1.1".
+    let path = req
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+
+    let mut token: Option<String> = None;
+    let mut origin: Option<String> = None;
+    if path.starts_with("/callback") {
+        if let Ok(u) = Url::parse(&format!("http://127.0.0.1{path}")) {
+            for (k, v) in u.query_pairs() {
+                match k.as_ref() {
+                    "token" => token = Some(v.into_owned()),
+                    "origin" => origin = Some(v.into_owned()),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let ok = token.is_some();
+    let body = if ok {
+        "<!doctype html><meta charset=utf-8><title>Signed in</title><body style=\"font-family:-apple-system,sans-serif;background:#09090f;color:#e9e9f2;display:flex;align-items:center;justify-content:center;height:100vh;margin:0\"><p>Signed in — you can close this tab and return to Planet A Foods.</p></body>"
+    } else {
+        "<!doctype html><meta charset=utf-8><body>Not found</body>"
+    };
+    let resp = format!(
+        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        if ok { "200 OK" } else { "404 Not Found" },
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+
+    if let Some(token) = token {
+        let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
+        redeem_into_app(app, &token, &origin);
     }
 }
 
@@ -597,7 +661,14 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         ],
     )?;
 
-    // Edit submenu so ⌘C/⌘V/⌘X/⌘A/undo/redo work inside content webviews.
+    // Edit submenu so ⌘C/⌘V/⌘X/undo/redo work inside content webviews.
+    //
+    // NOTE: Select All is deliberately OMITTED. A menu item with the ⌘A
+    // accelerator is handled by AppKit BEFORE the key reaches the web content, so
+    // it preempted paf_note's own ⌘A handler (Notion-style block→page select-all
+    // escalation) and gave native "select only this block" instead. Dropping the
+    // menu item lets ⌘A fall through to the webview, where the editor handles it.
+    // ⌘A still works normally in plain inputs (WKWebView handles it itself).
     let edit_menu = Submenu::with_items(
         app,
         "Edit",
@@ -609,7 +680,6 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
 
@@ -730,7 +800,31 @@ pub fn run() {
                 Size::Logical(LogicalSize::new(w, CHROME_HEIGHT)),
             )?;
 
-            // Route the passkey-login deep link. The system browser 302s to
+            // Loopback OAuth-callback server (PRIMARY sign-in return path). Bind
+            // an ephemeral port on 127.0.0.1 and serve it on a background thread;
+            // the port is handed to the browser as `cb`, so the sign-in flow
+            // redirects the handoff token straight back here. Plain http loopback
+            // needs no custom-scheme registration, so it works even on quarantined
+            // dmg installs where planetafoods:// is unregistered.
+            match TcpListener::bind("127.0.0.1:0") {
+                Ok(listener) => {
+                    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+                    app.manage(LoopbackPort(port));
+                    let lb = handle.clone();
+                    std::thread::spawn(move || {
+                        for stream in listener.incoming() {
+                            if let Ok(mut s) = stream {
+                                handle_loopback(&lb, &mut s);
+                            }
+                        }
+                    });
+                }
+                Err(_) => {
+                    app.manage(LoopbackPort(0));
+                }
+            }
+
+            // Route the passkey-login deep link (FALLBACK). The system browser 302s to
             // `planetafoods://auth?token=…&origin=…` after sign-in; redeem it
             // into the active tab's webview. Covers both the running-app case
             // and (via get_current) a cold start launched by the deep link.
