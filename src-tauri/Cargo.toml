@@ -1,6 +1,6 @@
 [package]
 name = "paf-hub-desktop"
-version = "0.2.1"
+version = "0.2.2"
 description = "Desktop window for the Planet A Foods app hub"
 authors = ["Planet A Foods"]
 edition = "2021"

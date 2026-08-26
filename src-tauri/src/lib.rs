@@ -72,8 +72,26 @@ fn content_label(id: u32) -> String {
 /// passkey / WebAuthn ceremony works (embedded webviews can't do it). These are
 /// the apps that expose the desktop-auth handoff endpoints (`/desktop-login`,
 /// `/api/desktop-auth/start` + `/exchange`). Add a host here once its server
-/// side ships the handoff. paf_note is proven first; the rest follow.
-const DESKTOP_AUTH_HOSTS: &[&str] = &["note.planet-a-foods.com"];
+/// side ships the handoff. paf_note was proven first (v0.2.1); the rest shipped
+/// their server side on 2026-08-26.
+const DESKTOP_AUTH_HOSTS: &[&str] = &[
+    "note.planet-a-foods.com",      // paf_note
+    "feedback.planet-a-foods.com",  // feedback
+    "commodity.planet-a-foods.com", // commodity
+    "coa.planet-a-foods.com",       // paf_coa
+    "analytics.planet-a-foods.com", // QOaroma (analytics web)
+];
+
+/// User agent for every content webview: WKWebView's default string plus a
+/// `PlanetAFoodsDesktop/<version>` marker. Our apps' sign-in pages look for the
+/// marker and redirect to `/desktop-login`, which `on_navigation` intercepts
+/// below and opens in the system browser — that is how apps whose sign-in
+/// page is `/` (not `/signin`) get the browser handoff too.
+const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) ",
+    "PlanetAFoodsDesktop/",
+    env!("CARGO_PKG_VERSION")
+);
 
 /// Does `host` expose the desktop-auth handoff endpoints?
 fn supports_desktop_auth(host: &str) -> bool {
@@ -362,6 +380,7 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
     let handle_newwin = app.clone();
 
     let builder = WebviewBuilder::new(label, url)
+        .user_agent(USER_AGENT)
         // Same external-SaaS guard as the original single-window app: external
         // SaaS domains hand off to the system browser and the in-window
         // navigation is cancelled; everything else (our apps) stays in-window.
@@ -377,8 +396,13 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
                     // Passkey login can't run in an embedded webview. When one of
                     // our apps would show its sign-in page, cancel that in-window
                     // navigation and open the app's /desktop-login in the SYSTEM
-                    // browser instead; the deep link brings the session back.
-                    if supports_desktop_auth(host) && url.path() == "/signin" {
+                    // browser instead; the loopback callback (or deep link) brings
+                    // the session back. `/desktop-login` is what an app's sign-in
+                    // page redirects to when it sees our user agent (apps whose
+                    // sign-in page is `/` rather than `/signin`).
+                    if supports_desktop_auth(host)
+                        && matches!(url.path(), "/signin" | "/desktop-login")
+                    {
                         open_browser_login(&handle_nav, host);
                         return false;
                     }
