@@ -80,6 +80,7 @@ const DESKTOP_AUTH_HOSTS: &[&str] = &[
     "commodity.planet-a-foods.com", // commodity
     "coa.planet-a-foods.com",       // paf_coa
     "analytics.planet-a-foods.com", // QOaroma (analytics web)
+    "finance.planet-a-foods.com",   // paf_finance (handoff pending on its server)
 ];
 
 /// User agent for every content webview: WKWebView's default string plus a
