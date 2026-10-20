@@ -83,6 +83,7 @@ const DESKTOP_AUTH_HOSTS: &[&str] = &[
     "finance.planet-a-foods.com",   // paf_finance
     "training.planet-a-foods.com",  // paf_training
     "freight.planet-a-foods.com",   // paf_freight
+    "sales.planet-a-foods.com",     // paf_sales (PAForce)
 ];
 
 /// User agent for every content webview: WKWebView's default string plus a
