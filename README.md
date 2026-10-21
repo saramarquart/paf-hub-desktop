@@ -24,7 +24,7 @@ The three truly-external SaaS tiles — **Personio, Spendesk, Qwiki** — are *n
 our apps, so we hand those off to the user's **default browser** (for their
 existing sessions/extensions). This is done in `src-tauri/src/lib.rs` via a Tauri
 v2 `on_navigation` hook: any navigation to `personio.com`, `spendesk.com` or
-`qwikinow.de` is opened with `tauri-plugin-opener` and cancelled in-window;
+`ariadne.cloud` (Qwiki) is opened with `tauri-plugin-opener` and cancelled in-window;
 everything else (i.e. our own domains) proceeds inside the window.
 
 ## Install (for the team)
