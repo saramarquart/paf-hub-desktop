@@ -24,10 +24,10 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -65,7 +65,7 @@ jobs:
           Remove-Item $pfxPath -Force
 
       - name: Build app + publish release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Tauri picks up this env var and signs the NSIS/MSI bundle with the
