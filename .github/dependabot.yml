@@ -1,0 +1,53 @@
+# Dependabot: weekly version updates, grouped, plus grouped security updates.
+# Security updates themselves are switched on in the repo settings
+# (Settings > Code security > Dependabot security updates); this file only shapes the PRs.
+# Patch-only PRs are merged automatically by .github/workflows/dependabot-auto-merge.yml
+# once CI passes; minor and major PRs wait for review.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      npm-patch-minor:
+        applies-to: version-updates
+        update-types: [patch, minor]
+        patterns: ["*"]
+      npm-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directories:
+      - "/src-tauri"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      cargo-patch-minor:
+        applies-to: version-updates
+        update-types: [patch, minor]
+        patterns: ["*"]
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
