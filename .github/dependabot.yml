@@ -2,7 +2,7 @@
 # Security updates themselves are switched on in the repo settings
 # (Settings > Code security > Dependabot security updates); this file only shapes the PRs.
 # Patch-only PRs are merged automatically by .github/workflows/dependabot-auto-merge.yml
-# once CI passes; minor and major PRs wait for review.
+# once CI passes; minor and major PRs wait for review. Majors come bundled, one PR per ecosystem.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -18,6 +18,11 @@ updates:
       npm-patch-minor:
         applies-to: version-updates
         update-types: [patch, minor]
+        patterns: ["*"]
+      # All major updates of this ecosystem in one PR, for review (never auto-merged).
+      npm-major:
+        applies-to: version-updates
+        update-types: [major]
         patterns: ["*"]
       npm-security:
         applies-to: security-updates
@@ -35,6 +40,11 @@ updates:
       cargo-patch-minor:
         applies-to: version-updates
         update-types: [patch, minor]
+        patterns: ["*"]
+      # All major updates of this ecosystem in one PR, for review (never auto-merged).
+      cargo-major:
+        applies-to: version-updates
+        update-types: [major]
         patterns: ["*"]
       cargo-security:
         applies-to: security-updates
