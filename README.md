@@ -1,85 +1,166 @@
 # Planet A Foods Desktop
 
-A native desktop wrapper around the **Planet A Foods app hub**
-(<https://hub.planet-a-foods.com/>). It opens the hub in its **own window**, and
-keeps the team inside **one coherent app** as they move between the internal
-tools — QOaroma, paf_note, paf_feedback, paf_training, paf_commodity, paf_coa,
-finance, paf_force (sales), paf_freight and paf_supplychain. Same logins,
-same data as the browser, just outside it.
+The **Planet A Foods app hub** (<https://hub.planet-a-foods.com/>) as a desktop
+app. It opens the hub in its own window with tabs, and keeps you in one app as you
+move between the internal tools: QOaroma, paf_note, paf_feedback, paf_training,
+paf_commodity, paf_coa, finance, paf_force (sales), paf_freight and
+paf_supplychain. Same logins and same data as in the browser, which keeps working
+as before.
 
-Built with [Tauri](https://tauri.app) v2: it uses the operating system's built-in
-webview (WKWebView on macOS, WebView2 on Windows), so installers are only a few MB.
+It needs an internet connection: the app is a window onto the live apps, not an
+offline copy.
 
-> **It is not offline.** The app is a window onto the live hosted hub and its
-> apps, so it needs an internet connection. The browser versions keep working
-> exactly as before — this is an *additional* way in.
+*Deutsche Kurzanleitung: [INSTALL.de.md](INSTALL.de.md).*
 
-## How navigation works (one app, not a launcher of browsers)
+## Install and first launch
 
-The hub's tiles are plain `<a href>` links with **no `target="_blank"`**, so the
-internal apps (all on `*.planet-a-foods.com`) **navigate within this window**.
-Their own "Hub" buttons link back to `hub.planet-a-foods.com`, so moving
-back-and-forth is seamless and in-window — it feels like a single app.
+Get the installer from the [Releases](../../releases) page (latest version at the
+top). File names below are for the current version, 0.2.6.
 
-The three truly-external SaaS tiles — **Personio, Moss, Ariadne** (formerly Qwiki) — are *not*
-our apps, so we hand those off to the user's **default browser** (for their
-existing sessions/extensions). This is done in `src-tauri/src/lib.rs` via a Tauri
-v2 `on_navigation` hook: any navigation to `personio.com`, `getmoss.com` or
-`ariadne.cloud` (Ariadne) is opened with `tauri-plugin-opener` and cancelled in-window;
-everything else (i.e. our own domains) proceeds inside the window.
+### Mac
 
-## Install (for the team)
+1. Download **`Planet.A.Foods_0.2.6_universal.dmg`** (works on Apple Silicon and Intel Macs).
+2. Open it and drag **Planet A Foods** into **Applications**.
+3. **First time only:** open **Terminal** (press ⌘ Space, type *Terminal*, press
+   Enter), paste this line and press Enter:
 
-Download the latest installer from the [Releases](../../releases) page:
+   ```
+   sudo xattr -dr com.apple.quarantine "/Applications/Planet A Foods.app"
+   ```
 
-- **macOS** — `Planet A Foods_<version>_universal.dmg` → open it, drag
-  **Planet A Foods** to Applications, then run the one-time quarantine step
-  (see [SIGNING.md](SIGNING.md) / `signing/install-macos.sh`).
-- **Windows** — `Planet A Foods_<version>_x64-setup.exe` → run it. On machines
-  where IT has trusted our code-signing cert, there's **no SmartScreen prompt**.
+   Type your Mac password when asked. Nothing shows while you type; that's
+   normal. Your account needs admin rights; if it doesn't have them, ask IT.
+4. Open **Planet A Foods** from Applications.
 
-See **[SIGNING.md](SIGNING.md)** for the exact IT steps that make both platforms
-prompt-free (and the honest macOS caveat about notarization).
+Why step 3: we don't pay for Apple's notarization, so macOS blocks the app after
+download. If you skip the step, macOS says the app *"is damaged and can't be
+opened"* or *"Apple could not verify…"*. The app isn't damaged; run step 3 and
+open it again. ([`signing/install-macos.sh`](signing/install-macos.sh) does the
+same thing.)
 
-## Signing
+**Installed by IT:** if IT installs **`Planet-A-Foods_0.2.6_universal.pkg`** for
+you via device management, skip step 3; there's no prompt.
 
-We use **self-signed certs that IT trusts on our machines** — no paid Apple or
-Windows account. Full instructions and the honest limits are in
-[SIGNING.md](SIGNING.md). Helper scripts live in `signing/`:
+### Windows
 
-- `windows-make-cert.ps1` — create the Windows code-signing cert (.pfx + .cer).
-- `macos-make-cert.sh` — create a self-signed macOS code-signing identity.
-- `install-macos.sh` — strip `com.apple.quarantine` after install (the real macOS gate).
+1. Download **`Planet.A.Foods_0.2.6_x64-setup.exe`**.
+2. Run it, then open **Planet A Foods** from the Start menu.
 
-## Cutting a release
+If Windows shows **"Windows protected your PC"** (SmartScreen), click **More info**
+→ **Run anyway**. You only see this when installing. It appears because our
+installers aren't signed with a commercial certificate. If IT installs the app
+for you, you won't see it.
+(`Planet.A.Foods_0.2.6_x64_en-US.msi` is the same app packaged for IT deployment.)
 
-Releases are built entirely in GitHub Actions — no local Rust toolchain required.
-Bump the version and push a tag:
+## Signing in
 
-```bash
-# 1. bump "version" in src-tauri/tauri.conf.json (and package.json), commit
-# 2. tag and push:
-git tag v0.1.0
-git push origin v0.1.0
-```
+The hub page itself needs no sign-in. When you open an app that does:
 
-The [`Release` workflow](.github/workflows/release.yml) builds the macOS `.dmg`
-and Windows `.exe`/`.msi` on their respective runners and attaches them to a new
-GitHub Release. Windows builds are signed if the `WINDOWS_CERT_BASE64` /
-`WINDOWS_CERT_PASSWORD` secrets are set (see SIGNING.md).
+1. **Your web browser opens** that app's sign-in page.
+2. Sign in with your Google work account there, as usual. If you're already
+   signed in to Google in that browser, this takes a second.
+3. The browser tab says **"Signed in — you can close this tab"** and **Planet A
+   Foods comes back to the front, signed in**, in the tab you were using. Close
+   the browser tab.
 
-## What to change
+You stay signed in, as in the browser. Each app signs in once. This works for
+QOaroma, paf_note, paf_feedback, paf_commodity, paf_coa, finance, paf_training,
+paf_freight and paf_force (sales). paf_supplychain follows in the next version.
 
-- **Which URL it opens** — `app.windows[0].url` in `src-tauri/tauri.conf.json`.
-- **App name / window title** — `productName` and `app.windows[0].title` there too.
-- **Which domains open in the browser vs in-window** — the `is_external_host`
-  list in `src-tauri/src/lib.rs`.
-- **Icon** — regenerate from a square source PNG:
-  `npm install && npm run tauri icon path/to/logo.png`.
+Why the detour: Google doesn't allow sign-in inside apps like this one, and your
+browser has your passwords and passkeys.
 
-## Local development
+If nothing happens, or the tab stays empty: go to the app's tab, choose
+**Planet A Foods → Sign in via browser** in the menu (⌘L on Mac, Ctrl+L on
+Windows), and keep the app open until you're back.
 
-Requires [Rust](https://www.rust-lang.org/tools/install) + Node. Then:
+## Tabs, and what opens where
+
+- **Our apps (`*.planet-a-foods.com`)** and other links open inside the app.
+  Links that would open a new browser tab open a new tab in the app.
+- **Personio, Moss and Ariadne** (formerly Qwiki) open in **your browser**, where
+  you're already signed in to them.
+- Tabs work like in a browser: **⌘T / Ctrl+T** new tab (opens the hub), **⌘W /
+  Ctrl+W** close tab, **⌘1–9 / Ctrl+1–9** jump to a tab, **Ctrl+Tab** next tab.
+
+## Updating to a new version
+
+The app doesn't update itself. When a new version is announced:
+
+- **Mac:** download the new `.dmg`, drag **Planet A Foods** to **Applications**,
+  choose **Replace**, then run the Terminal line from step 3 again (every new
+  download needs it once).
+- **Windows:** download and run the new `_x64-setup.exe`. It replaces the old
+  version.
+
+You normally stay signed in across updates. The installer file names contain the
+version number, e.g. `Planet.A.Foods_0.2.6_universal.dmg`.
+
+---
+
+## For maintainers
+
+### How it works
+
+A [Tauri](https://tauri.app) v2 app. It uses the operating system's own web view
+(WKWebView on macOS, WebView2 on Windows), so the installers are a few MB. All
+logic is in `src-tauri/src/lib.rs`:
+
+- **Tabs:** one native window with a local tab strip (`src/index.html`) and one
+  content webview per tab (Tauri's `unstable` multi-webview API).
+- **External SaaS:** `is_external_host` hands `personio.com`, `getmoss.com` and
+  `ariadne.cloud` to the system browser via `tauri-plugin-opener`. Everything
+  else stays in the window.
+- **Sign-in:** every request carries a `PlanetAFoodsDesktop/<version>` user-agent
+  marker. For hosts in `DESKTOP_AUTH_HOSTS`, the app cancels `/signin` and
+  `/desktop-login`, and opens `/desktop-login?cb=http://127.0.0.1:<port>/callback`
+  in the system browser. After Google sign-in, the server's
+  `/api/desktop-auth/start` 302s a single-use 60s token to that loopback
+  address. `redeem_into_app` then loads `/api/desktop-auth/exchange?token=…` in
+  the active tab, which sets the session cookie. The `planetafoods://` deep link
+  is only a fallback if the loopback server can't start. It isn't registered on
+  quarantined installs, so loopback is the path that matters.
+- To add an app: ship the server side (`/desktop-login`, `/api/desktop-auth/*`),
+  then add its host to `DESKTOP_AUTH_HOSTS`.
+
+The QOaroma desktop app
+([qoaroma-desktop](https://github.com/saramarquart/qoaroma-desktop)) uses a port
+of the same sign-in code, for analytics.planet-a-foods.com only.
+
+### Cutting a release
+
+Releases are built in GitHub Actions; no local Rust toolchain is needed.
+
+1. Bump `version` in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`;
+   merge to `main`.
+2. Tag and push: `git tag v0.2.7 && git push origin v0.2.7`.
+
+The [`Release` workflow](.github/workflows/release.yml) builds and attaches
+`Planet.A.Foods_<version>_universal.dmg`, `Planet-A-Foods_<version>_universal.pkg`
+(MDM), `Planet.A.Foods_<version>_x64-setup.exe`,
+`Planet.A.Foods_<version>_x64_en-US.msi` and a `.app.tar.gz` archive of the Mac
+app. CI (`ci.yml`) runs `cargo check` on every pull request.
+
+### Signing
+
+Self-signed certificates that IT trusts, no paid Apple or Windows account. Status,
+steps and honest limits are in [SIGNING.md](SIGNING.md). Scripts in `signing/`:
+
+- `install-macos.sh`: strips `com.apple.quarantine` after install (the real macOS gate).
+- `macos-make-cert.sh`: creates the self-signed macOS signing identity.
+- `windows-make-cert.ps1`: creates the Windows code-signing cert (`.pfx` + `.cer`).
+
+### What to change
+
+- **Start page:** `START_URL` in `src-tauri/src/lib.rs`.
+- **App name / window title:** `productName` and `app.windows[0].title` in `src-tauri/tauri.conf.json`.
+- **Which hosts open in the browser:** `is_external_host` in `src-tauri/src/lib.rs`.
+- **Which apps sign in via the browser:** `DESKTOP_AUTH_HOSTS` there too.
+- **Icon:** `npm install && npm run tauri icon path/to/logo.png`.
+
+### Local development
+
+Requires [Rust](https://www.rust-lang.org/tools/install) and Node:
 
 ```bash
 npm install

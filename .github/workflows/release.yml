@@ -23,6 +23,10 @@ jobs:
           - platform: windows-latest    # .exe (NSIS) + .msi
             args: ""
     runs-on: ${{ matrix.platform }}
+    env:
+      # "true" when the Windows signing secrets are set. A step's `if` can't see
+      # that step's own `env`, so the check lives here at job level.
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_BASE64 != '' && secrets.WINDOWS_CERT_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -51,7 +55,7 @@ jobs:
       # secrets are absent, the step is skipped and Windows builds ship unsigned.
       - name: Import Windows signing certificate
         id: winsign
-        if: matrix.platform == 'windows-latest' && env.WINDOWS_CERT_BASE64 != ''
+        if: matrix.platform == 'windows-latest' && env.HAS_WINDOWS_CERT == 'true'
         shell: pwsh
         env:
           WINDOWS_CERT_BASE64: ${{ secrets.WINDOWS_CERT_BASE64 }}
@@ -75,27 +79,25 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Planet A Foods ${{ github.ref_name }}"
           releaseBody: |
-            **Planet A Foods** — the native app hub. One window that launches all
-            the internal tools (QOaroma, paf_note, paf_feedback, paf_commodity,
-            paf_coa) and keeps you inside a single app as you move between them.
+            **Planet A Foods**: the app hub as a desktop app. One window with tabs
+            for all internal tools (QOaroma, paf_note, paf_feedback, paf_training,
+            paf_commodity, paf_coa, finance, paf_force, paf_freight,
+            paf_supplychain). Sign-in runs in your web browser, then you're back
+            in the app. Personio, Moss and Ariadne open in your browser.
 
-            **Downloads below:** `.dmg` for macOS, `.exe` (or `.msi`) for Windows.
+            **Which file?**
+            - Mac: the `.dmg` (or the `.pkg` if IT installs it for you).
+            - Windows: the `_x64-setup.exe` (the `.msi` is for IT).
 
-            ---
+            **Mac, first time only:** drag **Planet A Foods** to **Applications**,
+            then open **Terminal** and paste
+            `sudo xattr -dr com.apple.quarantine "/Applications/Planet A Foods.app"`
+            (enter your Mac password). After that it opens like any other app.
 
-            ### Install — macOS
-            1. Open the `.dmg` and drag **Planet A Foods** to **Applications**.
-            2. One-time unlock (the app is self-signed, not Apple-notarized):
-               open **Terminal** and run
-               `xattr -dr com.apple.quarantine "/Applications/Planet A Foods.app"`
-               then open the app normally. (IT can also push this step, or the
-               trusted cert, to managed Macs — see SIGNING.md.)
+            **Windows:** if you see "Windows protected your PC", click
+            **More info → Run anyway** (once).
 
-            ### Install — Windows
-            - Run the `.exe`. On machines where IT has trusted our code-signing
-              certificate, it installs **without any SmartScreen prompt**.
-            - On a machine that hasn't trusted the cert yet, click **More info →
-              Run anyway** on the SmartScreen prompt (one time). See SIGNING.md.
+            Full guide: [README](https://github.com/saramarquart/paf-hub-desktop#install-and-first-launch).
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
