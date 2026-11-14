@@ -54,8 +54,8 @@ const FALLBACK_H: f64 = 832.0;
 fn is_external_host(host: &str) -> bool {
     const EXTERNAL_SUFFIXES: &[&str] = &[
         "personio.com", // Personio — HR, people & payroll
-        "spendesk.com", // Spendesk — company spend
-        "ariadne.cloud", // Qwiki (forplaneta.ariadne.cloud) — process management
+        "getmoss.com",   // Moss — company spend (replaced Spendesk)
+        "ariadne.cloud", // Ariadne, formerly Qwiki (forplaneta.ariadne.cloud) — process management
     ];
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     EXTERNAL_SUFFIXES
