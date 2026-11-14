@@ -84,12 +84,18 @@ enum Redeem {
     /// the `X-Desktop-Code-Verifier` header. The ticket never sits in a URL sent
     /// to the server, and only this app instance can redeem it.
     PostWithVerifier,
-    /// The apps that only redeem `GET /api/desktop-auth/exchange?token=…` and
-    /// have no PKCE (or take the verifier from the URL only). No challenge is
-    /// sent, so their tickets stay unbound; the loopback `state` check below
-    /// still applies. Move a host to `PostWithVerifier` once its server accepts
-    /// the header (paf_note: its desktop-auth hardening PR).
-    LegacyGet,
+    /// `GET /api/desktop-auth/exchange?token=…`, but sent FROM the app's own
+    /// origin: the webview first opens the token-less exchange page (as above),
+    /// then navigates to the token URL from there, so the request is
+    /// `Sec-Fetch-Site: same-origin`. For apps that refuse a same-site
+    /// redemption but don't take the header yet (paf_note with its hardening PR,
+    /// which also keeps working without it). No challenge is sent.
+    GetFromOrigin,
+    /// The original `GET …?token=…` navigation from whatever page the tab is
+    /// on, for apps with no PKCE and no site check. No challenge is sent, so
+    /// their tickets stay unbound; the loopback `state` check below still
+    /// applies. Move a host up once its server accepts the header.
+    GetDirect,
 }
 
 /// Hosts whose sign-in must be routed through the SYSTEM BROWSER so the OS
@@ -101,15 +107,15 @@ enum Redeem {
 /// 2026-08-26; paf_supplychain in v0.2.7 (its server side must be live on
 /// production before this build ships: it requires PKCE).
 const DESKTOP_AUTH_HOSTS: &[(&str, Redeem)] = &[
-    ("note.planet-a-foods.com", Redeem::LegacyGet),        // paf_note
+    ("note.planet-a-foods.com", Redeem::GetFromOrigin),    // paf_note
     ("feedback.planet-a-foods.com", Redeem::PostWithVerifier), // feedback
-    ("commodity.planet-a-foods.com", Redeem::LegacyGet),   // commodity
-    ("coa.planet-a-foods.com", Redeem::LegacyGet),         // paf_coa
-    ("analytics.planet-a-foods.com", Redeem::LegacyGet),   // QOaroma (analytics web)
-    ("finance.planet-a-foods.com", Redeem::LegacyGet),     // paf_finance
+    ("commodity.planet-a-foods.com", Redeem::GetDirect),   // commodity
+    ("coa.planet-a-foods.com", Redeem::GetDirect),         // paf_coa
+    ("analytics.planet-a-foods.com", Redeem::GetDirect),   // QOaroma (analytics web)
+    ("finance.planet-a-foods.com", Redeem::GetDirect),     // paf_finance
     ("training.planet-a-foods.com", Redeem::PostWithVerifier), // paf_training
-    ("freight.planet-a-foods.com", Redeem::LegacyGet),     // paf_freight
-    ("sales.planet-a-foods.com", Redeem::LegacyGet),       // paf_sales (PAForce)
+    ("freight.planet-a-foods.com", Redeem::GetDirect),     // paf_freight
+    ("sales.planet-a-foods.com", Redeem::GetDirect),       // paf_sales (PAForce)
     ("supplychain.planet-a-foods.com", Redeem::PostWithVerifier), // paf_supplychain
 ];
 
@@ -322,18 +328,20 @@ fn callback_matches(cb: &Callback, login_host: &str) -> bool {
     cb.origin.trim_end_matches('/') == format!("https://{login_host}")
 }
 
-/// A POST redemption waiting for its landing page to load (managed state):
-/// which webview, which origin, the ticket and the verifier.
-struct PostRedeem {
+/// A redemption waiting for its landing page (the app's token-less exchange
+/// page) to load (managed state): which webview, which origin, how, the ticket
+/// and the verifier.
+struct LandingRedeem {
     label: String,
     origin: String,
+    redeem: Redeem,
     token: String,
     verifier: String,
     created: Instant,
 }
 
 #[derive(Default)]
-struct PendingRedeem(Mutex<Option<PostRedeem>>);
+struct PendingRedeem(Mutex<Option<LandingRedeem>>);
 
 /// The page the webview opens on the app's origin before the POST: the
 /// exchange endpoint itself, without a token (every app answers it with its
@@ -342,10 +350,11 @@ const EXCHANGE_PATH: &str = "/api/desktop-auth/exchange";
 
 /// Redeem a handoff ticket (minted by `login.host`) into the app's active tab:
 /// bring the window to the front, then
-///  - PostWithVerifier: open `https://<host>/api/desktop-auth/exchange` (no
-///    token) and, once it has loaded (`on_page_load` -> `finish_post_redeem`),
-///    POST the ticket from that page with the verifier in a header;
-///  - LegacyGet: navigate to `https://<host>/api/desktop-auth/exchange?token=…`
+///  - PostWithVerifier / GetFromOrigin: open `https://<host>/api/desktop-auth/exchange`
+///    (no token) and, once it has loaded (`on_page_load` -> `finish_landing_redeem`),
+///    POST the ticket from that page with the verifier in a header, or navigate
+///    from it to `…/exchange?token=…`;
+///  - GetDirect: navigate to `https://<host>/api/desktop-auth/exchange?token=…`
 ///    as before (`location.replace`, so it never lands in history).
 /// Either way the server sets the session cookie IN THIS WEBVIEW and lands on `/`.
 /// Only ever the host this sign-in was started for, over https.
@@ -365,27 +374,29 @@ fn redeem_into_app(app: &AppHandle, login: &PendingLogin, token: &str) {
     let Some(view) = active_content_webview(app) else {
         return;
     };
-    if login.redeem == Redeem::PostWithVerifier {
-        *app.state::<PendingRedeem>().0.lock().unwrap() = Some(PostRedeem {
+    if login.redeem == Redeem::GetDirect {
+        exchange.query_pairs_mut().append_pair("token", token);
+    } else {
+        *app.state::<PendingRedeem>().0.lock().unwrap() = Some(LandingRedeem {
             label: view.label().to_string(),
             origin: origin.clone(),
+            redeem: login.redeem,
             token: token.to_string(),
             verifier: login.verifier.clone(),
             created: Instant::now(),
         });
-    } else {
-        exchange.query_pairs_mut().append_pair("token", token);
     }
     if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
         let _ = view.eval(&format!("window.location.replace({js_url});"));
     }
 }
 
-/// `on_page_load` (Finished) of a content webview: if a POST redemption is
-/// waiting for exactly this webview, this origin and the exchange path, POST it
-/// from this page now (same origin: no CORS, the app's CSRF check passes, and
-/// the header can't come from any other site). Expires after a minute.
-fn finish_post_redeem(app: &AppHandle, webview: &tauri::webview::Webview<Wry>, url: &Url) {
+/// `on_page_load` (Finished) of a content webview: if a redemption is waiting
+/// for exactly this webview, this origin and the token-less exchange page, run
+/// it from this page now: the POST with the verifier header (same origin: no
+/// CORS, the app's CSRF check passes, and the header can't come from any other
+/// site), or the same-origin GET. Expires after a minute.
+fn finish_landing_redeem(app: &AppHandle, webview: &tauri::webview::Webview<Wry>, url: &Url) {
     let pending = {
         let state = app.state::<PendingRedeem>();
         let mut slot = state.0.lock().unwrap();
@@ -404,6 +415,16 @@ fn finish_post_redeem(app: &AppHandle, webview: &tauri::webview::Webview<Wry>, u
         slot.take()
     };
     let Some(p) = pending else { return };
+    if p.redeem == Redeem::GetFromOrigin {
+        let Ok(mut exchange) = Url::parse(&format!("{}{EXCHANGE_PATH}", p.origin)) else {
+            return;
+        };
+        exchange.query_pairs_mut().append_pair("token", &p.token);
+        if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
+            let _ = webview.eval(&format!("window.location.replace({js_url});"));
+        }
+        return;
+    }
     let (Ok(token), Ok(verifier)) = (serde_json::to_string(&p.token), serde_json::to_string(&p.verifier)) else {
         return;
     };
@@ -635,10 +656,10 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
             }
             true
         })
-        // A POST redemption (Redeem::PostWithVerifier) waits for its landing page.
+        // A redemption from the app's own origin (PostWithVerifier, GetFromOrigin) waits for its landing page.
         .on_page_load(move |webview, payload| {
             if payload.event() == PageLoadEvent::Finished {
-                finish_post_redeem(&handle_load, &webview, payload.url());
+                finish_landing_redeem(&handle_load, &webview, payload.url());
             }
         })
         // Update the pill's title from the page's document title.
@@ -1136,7 +1157,8 @@ mod tests {
     fn host_table() {
         assert_eq!(desktop_auth_host("supplychain.planet-a-foods.com"), Some(("supplychain.planet-a-foods.com", Redeem::PostWithVerifier)));
         assert_eq!(desktop_auth_host("SupplyChain.planet-a-foods.com."), Some(("supplychain.planet-a-foods.com", Redeem::PostWithVerifier)));
-        assert_eq!(desktop_auth_host("note.planet-a-foods.com").map(|h| h.1), Some(Redeem::LegacyGet));
+        assert_eq!(desktop_auth_host("note.planet-a-foods.com").map(|h| h.1), Some(Redeem::GetFromOrigin));
+        assert_eq!(desktop_auth_host("finance.planet-a-foods.com").map(|h| h.1), Some(Redeem::GetDirect));
         assert_eq!(desktop_auth_host("feedback.planet-a-foods.com").map(|h| h.1), Some(Redeem::PostWithVerifier));
         assert_eq!(desktop_auth_host("training.planet-a-foods.com").map(|h| h.1), Some(Redeem::PostWithVerifier));
         assert!(desktop_auth_host("evil-supplychain.planet-a-foods.com").is_none());
@@ -1155,7 +1177,7 @@ mod tests {
         assert_eq!(q["code_challenge_method"], "S256");
         assert!(!u.as_str().contains("VERIFIER"), "the verifier never leaves the app");
 
-        let legacy = desktop_login_url("note.planet-a-foods.com", Redeem::LegacyGet, 53111, "STATE", "VERIFIER").unwrap();
+        let legacy = desktop_login_url("note.planet-a-foods.com", Redeem::GetFromOrigin, 53111, "STATE", "VERIFIER").unwrap();
         let q: HashMap<String, String> = legacy.query_pairs().into_owned().collect();
         assert_eq!(q["cb"], "http://127.0.0.1:53111/callback/STATE");
         assert!(!q.contains_key("code_challenge"));

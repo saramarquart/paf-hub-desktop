@@ -62,18 +62,23 @@ Since 0.2.7, every sign-in carries:
   redeemed by a same-origin POST from the app's own page, with the verifier in
   the `X-Desktop-Code-Verifier` header, so it never sits in a URL sent to the
   server. The other apps still redeem with
-  `GET /api/desktop-auth/exchange?token=…` and get no challenge.
+  `GET /api/desktop-auth/exchange?token=…` and get no challenge. For paf_note
+  that GET is sent from the app's own token-less exchange page, so it arrives
+  same-origin: paf_note refuses same-site redemptions.
 
 How each app redeems today (checked against their code on 2026-11-14):
 
 | App | Host | Redeem |
 | --- | --- | --- |
 | feedback, paf_training, paf_supplychain | feedback / training / supplychain | POST + header, PKCE |
-| paf_note | note | GET (moves to POST once its hardening PR is live) |
+| paf_note | note | GET from its own origin (moves to POST + header once its hardening PR is live) |
 | commodity, paf_coa, QOaroma, finance, paf_freight, paf_sales | commodity / coa / analytics / finance / freight / sales | GET, no PKCE |
 
 When an app's server starts accepting the header, change its entry to
-`Redeem::PostWithVerifier`.
+`Redeem::PostWithVerifier`. A desktop build older than 0.2.7 can't sign in to
+paf_supplychain (PKCE required) and, once paf_note's hardening PR is live, not
+to paf_note either (its same-site redemption is refused), so roll out 0.2.7
+first.
 
 ## Signing
 
