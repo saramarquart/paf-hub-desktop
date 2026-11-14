@@ -24,8 +24,9 @@ jobs:
             args: ""
     runs-on: ${{ matrix.platform }}
     env:
-      # "true" when the Windows signing secrets are set. A step's `if` can't see
-      # that step's own `env`, so the check lives here at job level.
+      # "true" when the Windows signing secrets are set. Checked at job level:
+      # a step's `if` isn't documented to see that step's own `env`, and
+      # `secrets` can't be used in `if` directly.
       HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT_BASE64 != '' && secrets.WINDOWS_CERT_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@v7
