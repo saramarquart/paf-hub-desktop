@@ -5,12 +5,22 @@ commercial Windows code-signing certificate. Instead we use **self-signed
 certificates that IT trusts on our own machines**. This is enough to remove the
 security popups on Windows, and to remove the *identity* complaint on macOS.
 
+The QOaroma desktop app ([qoaroma-desktop](https://github.com/saramarquart/qoaroma-desktop))
+uses the **same certificate**, so IT trusts one certificate for both apps.
+
 Read the honest limits below before promising "no popups" to anyone — the two
 platforms are **not** the same.
 
+## Status (v0.2.6, November 2026)
+
+| | What the release contains | What users see after downloading |
+| --- | --- | --- |
+| **macOS** | `.dmg` whose app carries only the linker's ad-hoc signature (no sealed bundle; `codesign --verify` reports it as not signed), not notarized. `.pkg` (unsigned) for MDM. | Gatekeeper blocks it ("is damaged" / "could not verify") until the quarantine flag is removed (`signing/install-macos.sh`). Installed via MDM `.pkg`: no prompt. |
+| **Windows** | `.exe` / `.msi`, **unsigned**: the `WINDOWS_CERT_*` secrets are not set in this repo yet. | SmartScreen: **More info → Run anyway**, once per install. |
+
 | Platform | With self-signed cert trusted | The real no-popup gate |
 | --- | --- | --- |
-| **Windows** | SmartScreen prompt **disappears** once IT trusts the cert on the machine. | Trust the `.cer` (Trusted Root + Trusted Publishers). Genuinely popup-free. |
+| **Windows** | Windows shows **Planet A Foods** as a verified publisher instead of "Unknown publisher". SmartScreen is a separate check (see below). | IT deploys the installer (Intune / GPO), so it isn't marked as downloaded. Otherwise **More info → Run anyway** once per install. |
 | **macOS** | "Unidentified developer" *identity* complaint goes away. | **Quarantine strip.** A downloaded app is still Gatekeeper-blocked because it isn't *notarized*. `xattr -dr com.apple.quarantine` is the actual gate. Zero-touch requires the $99 Apple account — no free workaround. |
 
 ---
@@ -46,7 +56,8 @@ In the GitHub repo → **Settings → Secrets and variables → Actions**, add:
 `.github/workflows/release.yml` imports the `.pfx` on the Windows runner and
 passes its thumbprint to Tauri via `TAURI_WINDOWS_CERTIFICATE_THUMBPRINT`, so the
 `.exe`/`.msi` come out **signed**. (If the secrets are absent, the build still
-succeeds — just unsigned.)
+succeeds — just unsigned.) Add the same two secrets, with the same values, to
+qoaroma-desktop.
 
 ### 3. IT trusts the cert on each machine (removes SmartScreen)
 
@@ -60,7 +71,19 @@ Import-Certificate -FilePath paf-codesign.cer -CertStoreLocation Cert:\LocalMach
 Or fleet-wide via **GPO / Intune**: push `paf-codesign.cer` into
 **Trusted Root Certification Authorities** and **Trusted Publishers**.
 
-Once trusted, the signed installer runs with **no SmartScreen prompt**.
+Once trusted, Windows shows **Planet A Foods** as a verified publisher.
+
+### SmartScreen, stated plainly
+
+SmartScreen's **"Windows protected your PC"** check is a reputation service run by
+Microsoft, separate from local certificate trust. We expect a locally trusted
+self-signed certificate **not** to be enough to skip it for an installer
+downloaded in a browser. **Not yet tested on our PCs.** The reliable ways to have
+no prompt:
+
+- IT deploys the `.msi` / `.exe` (Intune, GPO, software center). Files deployed
+  this way aren't marked as downloaded, so SmartScreen doesn't check them.
+- Otherwise, users click **More info → Run anyway** once per install.
 
 ---
 
@@ -84,7 +107,9 @@ In `src-tauri/tauri.conf.json`, set:
 
 Leave it `null` for CI (the GitHub runners don't have our keychain). CI produces
 an **ad-hoc / unsigned** `.dmg`; the quarantine strip below is what matters
-either way.
+either way. (qoaroma-desktop sets `"-"` instead, which makes CI ad-hoc seal
+the whole bundle so `codesign --verify` passes. Worth adopting here too. It
+changes no prompt.)
 
 ### 3. The actual gate: strip quarantine on install
 
@@ -98,7 +123,11 @@ sudo xattr -dr com.apple.quarantine "/Applications/Planet A Foods.app"
 ```
 
 `signing/install-macos.sh` does exactly this. After it, the app opens with no
-prompt.
+prompt. A **new version** downloaded later is quarantined again, so the step is
+needed once per update.
+
+Alternatively IT deploys `Planet-A-Foods_<version>_universal.pkg` (attached to
+every release) through MDM: MDM installs aren't quarantined, so nothing prompts.
 
 ### The limit, stated plainly
 
@@ -113,5 +142,6 @@ app" — it isn't; it's trusted-by-us + quarantine-stripped.
 ## Rotating / expiry
 
 - Windows cert: 5-year default. When it expires, re-run `windows-make-cert.ps1`,
-  update the two GitHub secrets, and re-distribute the new `.cer` to machines.
+  update the two GitHub secrets (here **and** in qoaroma-desktop), and
+  re-distribute the new `.cer` to machines.
 - macOS identity: 5-year default; re-run `macos-make-cert.sh`.
