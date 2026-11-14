@@ -73,7 +73,8 @@ fn content_label(id: u32) -> String {
 /// the apps that expose the desktop-auth handoff endpoints (`/desktop-login`,
 /// `/api/desktop-auth/start` + `/exchange`). Add a host here once its server
 /// side ships the handoff. paf_note was proven first (v0.2.1); the rest shipped
-/// their server side on 2026-08-26.
+/// their server side on 2026-08-26; paf_supplychain in v0.2.7 (its server side
+/// must be live on production before this build ships).
 const DESKTOP_AUTH_HOSTS: &[&str] = &[
     "note.planet-a-foods.com",      // paf_note
     "feedback.planet-a-foods.com",  // feedback
@@ -84,6 +85,7 @@ const DESKTOP_AUTH_HOSTS: &[&str] = &[
     "training.planet-a-foods.com",  // paf_training
     "freight.planet-a-foods.com",   // paf_freight
     "sales.planet-a-foods.com",     // paf_sales (PAForce)
+    "supplychain.planet-a-foods.com", // paf_supplychain
 ];
 
 /// User agent for every content webview: WKWebView's default string plus a
