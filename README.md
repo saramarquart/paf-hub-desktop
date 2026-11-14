@@ -3,7 +3,8 @@
 A native desktop wrapper around the **Planet A Foods app hub**
 (<https://hub.planet-a-foods.com/>). It opens the hub in its **own window**, and
 keeps the team inside **one coherent app** as they move between the internal
-tools — QOaroma, paf_note, paf_feedback, paf_commodity and paf_coa. Same logins,
+tools — QOaroma, paf_note, paf_feedback, paf_training, paf_commodity, paf_coa,
+finance, paf_force (sales), paf_freight and paf_supplychain. Same logins,
 same data as the browser, just outside it.
 
 Built with [Tauri](https://tauri.app) v2: it uses the operating system's built-in
@@ -20,11 +21,11 @@ internal apps (all on `*.planet-a-foods.com`) **navigate within this window**.
 Their own "Hub" buttons link back to `hub.planet-a-foods.com`, so moving
 back-and-forth is seamless and in-window — it feels like a single app.
 
-The three truly-external SaaS tiles — **Personio, Spendesk, Qwiki** — are *not*
+The three truly-external SaaS tiles — **Personio, Moss, Ariadne** (formerly Qwiki) — are *not*
 our apps, so we hand those off to the user's **default browser** (for their
 existing sessions/extensions). This is done in `src-tauri/src/lib.rs` via a Tauri
-v2 `on_navigation` hook: any navigation to `personio.com`, `spendesk.com` or
-`ariadne.cloud` (Qwiki) is opened with `tauri-plugin-opener` and cancelled in-window;
+v2 `on_navigation` hook: any navigation to `personio.com`, `getmoss.com` or
+`ariadne.cloud` (Ariadne) is opened with `tauri-plugin-opener` and cancelled in-window;
 everything else (i.e. our own domains) proceeds inside the window.
 
 ## Install (for the team)
