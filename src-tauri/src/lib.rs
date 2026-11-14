@@ -75,7 +75,7 @@ fn content_label(id: u32) -> String {
 }
 
 /// How a desktop-auth app takes its handoff ticket back, as each app's server
-/// code accepts it TODAY (checked 2026-11-14; see README "Desktop sign-in").
+/// code accepts it TODAY (checked 2026-11-14; see DESKTOP_SIGNIN.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Redeem {
     /// PKCE (S256): the sign-in carries a `code_challenge`; the webview first
