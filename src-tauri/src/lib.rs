@@ -27,14 +27,20 @@
 // focus — so ⌘T/⌘W/⌘1-9 are wired as menu items with accelerators, and their
 // events drive the tab manager.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 use serde::Serialize;
 use tauri::{
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
-    webview::{NewWindowResponse, WebviewBuilder},
+    webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, Url,
     WebviewUrl, Window, WindowEvent, Wry,
 };
@@ -68,22 +74,50 @@ fn content_label(id: u32) -> String {
     format!("content-{id}")
 }
 
+/// How a desktop-auth app takes its handoff ticket back, as each app's server
+/// code accepts it TODAY (checked 2026-11-14; see DESKTOP_SIGNIN.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Redeem {
+    /// PKCE (S256): the sign-in carries a `code_challenge`; the webview first
+    /// opens `/api/desktop-auth/exchange` (no token: the app's 401 page, so it
+    /// is on that origin), then POSTs the ticket from there with the verifier in
+    /// the `X-Desktop-Code-Verifier` header. The ticket never sits in a URL sent
+    /// to the server, and only this app instance can redeem it.
+    PostWithVerifier,
+    /// PKCE (S256) too, for an app that reads the verifier from the URL today
+    /// and from the header once it is hardened (paf_note: before and after
+    /// saramarquart/paf_note#251). From the app's token-less exchange page (as
+    /// above), a same-origin `fetch` GET of `…/exchange?token=…&code_verifier=…`
+    /// that ALSO carries the `X-Desktop-Code-Verifier` header; its Set-Cookie
+    /// applies, then the page goes to `/`. Works with either server version, so
+    /// note can require PKCE (`DESKTOP_AUTH_REQUIRE_PKCE=1`) right after 0.2.7.
+    GetWithVerifier,
+    /// The original `GET …?token=…` navigation from whatever page the tab is
+    /// on, for apps with no PKCE and no site check. No challenge is sent, so
+    /// their tickets stay unbound; the loopback `state` check below still
+    /// applies. Move a host up once its server accepts the header.
+    GetDirect,
+}
+
 /// Hosts whose sign-in must be routed through the SYSTEM BROWSER so the OS
-/// passkey / WebAuthn ceremony works (embedded webviews can't do it). These are
-/// the apps that expose the desktop-auth handoff endpoints (`/desktop-login`,
-/// `/api/desktop-auth/start` + `/exchange`). Add a host here once its server
-/// side ships the handoff. paf_note was proven first (v0.2.1); the rest shipped
-/// their server side on 2026-08-26.
-const DESKTOP_AUTH_HOSTS: &[&str] = &[
-    "note.planet-a-foods.com",      // paf_note
-    "feedback.planet-a-foods.com",  // feedback
-    "commodity.planet-a-foods.com", // commodity
-    "coa.planet-a-foods.com",       // paf_coa
-    "analytics.planet-a-foods.com", // QOaroma (analytics web)
-    "finance.planet-a-foods.com",   // paf_finance
-    "training.planet-a-foods.com",  // paf_training
-    "freight.planet-a-foods.com",   // paf_freight
-    "sales.planet-a-foods.com",     // paf_sales (PAForce)
+/// passkey / WebAuthn ceremony works (embedded webviews can't do it, and Google
+/// blocks them). These are the apps that expose the desktop-auth handoff
+/// endpoints (`/desktop-login`, `/api/desktop-auth/start` + `/exchange`), and
+/// how each redeems. Add a host here once its server side ships the handoff.
+/// paf_note was proven first (v0.2.1); the rest shipped their server side on
+/// 2026-08-26; paf_supplychain in v0.2.7 (its server side must be live on
+/// production before this build ships: it requires PKCE).
+const DESKTOP_AUTH_HOSTS: &[(&str, Redeem)] = &[
+    ("note.planet-a-foods.com", Redeem::GetWithVerifier),  // paf_note
+    ("feedback.planet-a-foods.com", Redeem::PostWithVerifier), // feedback
+    ("commodity.planet-a-foods.com", Redeem::GetDirect),   // commodity
+    ("coa.planet-a-foods.com", Redeem::GetDirect),         // paf_coa
+    ("analytics.planet-a-foods.com", Redeem::GetDirect),   // QOaroma (analytics web)
+    ("finance.planet-a-foods.com", Redeem::GetDirect),     // paf_finance
+    ("training.planet-a-foods.com", Redeem::PostWithVerifier), // paf_training
+    ("freight.planet-a-foods.com", Redeem::GetDirect),     // paf_freight
+    ("sales.planet-a-foods.com", Redeem::GetDirect),       // paf_sales (PAForce)
+    ("supplychain.planet-a-foods.com", Redeem::PostWithVerifier), // paf_supplychain
 ];
 
 /// User agent for every content webview: WKWebView's default string plus a
@@ -97,10 +131,15 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION")
 );
 
+/// The canonical table entry for `host`, if it exposes the desktop-auth handoff.
+fn desktop_auth_host(host: &str) -> Option<(&'static str, Redeem)> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    DESKTOP_AUTH_HOSTS.iter().copied().find(|(h, _)| host == *h)
+}
+
 /// Does `host` expose the desktop-auth handoff endpoints?
 fn supports_desktop_auth(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    DESKTOP_AUTH_HOSTS.iter().any(|h| host == *h)
+    desktop_auth_host(host).is_some()
 }
 
 /// The content webview of the currently-active tab, if any.
@@ -113,22 +152,106 @@ fn active_content_webview(app: &AppHandle) -> Option<tauri::webview::Webview<Wry
     app.get_webview(&content_label(active))
 }
 
+// ── One sign-in in flight: state + PKCE ──────────────────────────────────────
+
+/// A sign-in this app started: which host, and the PKCE verifier only this app
+/// knows. Keyed by its random `state` in `PendingLogins`. A callback is accepted
+/// only with a known state and only from that host; the entry is used once.
+struct PendingLogin {
+    host: &'static str,
+    redeem: Redeem,
+    verifier: String,
+    created: Instant,
+}
+
+/// Sign-ins in flight (managed state). Small and short-lived on purpose.
+#[derive(Default)]
+struct PendingLogins(Mutex<HashMap<String, PendingLogin>>);
+
+/// How long a started sign-in may take in the browser (Google, passkey, the click).
+const LOGIN_TTL: Duration = Duration::from_secs(10 * 60);
+/// At most this many sign-ins in flight; the oldest is dropped beyond it.
+const MAX_PENDING_LOGINS: usize = 8;
+
+/// 32 random bytes from the OS, base64url without padding (43 characters):
+/// valid as an OAuth `state` and as an RFC 7636 code_verifier.
+fn random_token() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("the OS random number generator failed");
+    URL_SAFE_NO_PAD.encode(buf)
+}
+
+/// RFC 7636 S256: base64url(sha256(verifier)), no padding.
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Remember a new sign-in for `host`; returns its state and the verifier.
+fn begin_login(app: &AppHandle, host: &'static str, redeem: Redeem) -> (String, String) {
+    let state = random_token();
+    let verifier = random_token();
+    let logins = app.state::<PendingLogins>();
+    let mut map = logins.0.lock().unwrap();
+    map.retain(|_, p| p.created.elapsed() < LOGIN_TTL);
+    while map.len() >= MAX_PENDING_LOGINS {
+        let oldest = map.iter().min_by_key(|(_, p)| p.created).map(|(k, _)| k.clone());
+        match oldest {
+            Some(k) => {
+                map.remove(&k);
+            }
+            None => break,
+        }
+    }
+    map.insert(
+        state.clone(),
+        PendingLogin { host, redeem, verifier: verifier.clone(), created: Instant::now() },
+    );
+    (state, verifier)
+}
+
+/// Take (use up) the sign-in for `state`, if it exists and isn't stale.
+fn take_login(app: &AppHandle, state: &str) -> Option<PendingLogin> {
+    let logins = app.state::<PendingLogins>();
+    let mut map = logins.0.lock().unwrap();
+    let p = map.remove(state)?;
+    (p.created.elapsed() < LOGIN_TTL).then_some(p)
+}
+
+/// The `/desktop-login` URL that starts a sign-in for `host` in the browser.
+fn desktop_login_url(host: &str, redeem: Redeem, port: u16, state: &str, verifier: &str) -> Option<Url> {
+    let mut url = Url::parse(&format!("https://{host}/desktop-login")).ok()?;
+    {
+        let mut q = url.query_pairs_mut();
+        // Prefer the loopback callback: the server redirects the token straight to
+        // our local http server. The state rides in the callback PATH, which every
+        // app keeps when it adds `token`/`origin`, so it comes back even from apps
+        // that don't echo a `state` parameter.
+        if port != 0 {
+            q.append_pair("cb", &format!("http://127.0.0.1:{port}/callback/{state}"));
+        }
+        q.append_pair("state", state);
+        if redeem != Redeem::GetDirect {
+            q.append_pair("code_challenge", &pkce_challenge(verifier));
+            q.append_pair("code_challenge_method", "S256");
+        }
+    }
+    Some(url)
+}
+
 /// Kick off a passkey-capable login for `host` by opening its `/desktop-login`
 /// bridge page in the user's DEFAULT BROWSER. The browser does the Google +
-/// passkey sign-in, then the server 302-redirects to `planetafoods://auth?…`,
-/// which `handle_deep_link` catches and redeems back into the app's webview.
+/// passkey sign-in, then the server redirects to our loopback callback (or,
+/// failing that, `planetafoods://auth?…`), which we accept only for THIS
+/// sign-in (its state) and redeem only on THIS host.
 fn open_browser_login(app: &AppHandle, host: &str) {
-    let port = { app.state::<LoopbackPort>().0 };
-    let Ok(mut url) = Url::parse(&format!("https://{host}/desktop-login")) else {
+    let Some((host, redeem)) = desktop_auth_host(host) else {
         return;
     };
-    // Prefer the loopback callback: the server redirects the token straight to
-    // our local http server. Falls back to the deep link only if we couldn't bind.
-    if port != 0 {
-        url.query_pairs_mut()
-            .append_pair("cb", &format!("http://127.0.0.1:{port}/callback"));
+    let port = { app.state::<LoopbackPort>().0 };
+    let (state, verifier) = begin_login(app, host, redeem);
+    if let Some(url) = desktop_login_url(host, redeem, port, &state, &verifier) {
+        let _ = app.opener().open_url(url.as_str(), None::<String>);
     }
-    let _ = app.opener().open_url(url.as_str(), None::<String>);
 }
 
 /// Manual "Sign in via browser" trigger (menu). Uses the active tab's host when
@@ -138,7 +261,7 @@ fn browser_login_active(app: &AppHandle) {
         .and_then(|v| v.url().ok())
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .filter(|h| supports_desktop_auth(h))
-        .unwrap_or_else(|| DESKTOP_AUTH_HOSTS[0].to_string());
+        .unwrap_or_else(|| DESKTOP_AUTH_HOSTS[0].0.to_string());
     open_browser_login(app, &host);
 }
 
@@ -146,35 +269,101 @@ fn browser_login_active(app: &AppHandle) {
 /// the server failed to bind and only the deep-link fallback is available.
 struct LoopbackPort(u16);
 
-/// Redeem a handoff `token` (minted by `origin`) into the app: bring the window
-/// to the front and navigate the active tab's webview to
-/// `${origin}/api/desktop-auth/exchange?token=…`, which sets the session cookie
-/// IN THIS WEBVIEW and lands on `/` — the user is now logged in. Shared by BOTH
-/// the loopback-callback path (primary) and the deep-link path (fallback).
-///
-/// We navigate via `location.replace` (engine-level eval) so the exchange URL
-/// never lands in history; the token is percent-encoded by `Url`, surviving
-/// intact. We only ever redeem against one of our own `*.planet-a-foods.com`
-/// hosts (subdomain-anchored) over https.
-fn redeem_into_app(app: &AppHandle, token: &str, origin: &str) {
-    let Ok(mut exchange) = Url::parse(&format!(
-        "{}/api/desktop-auth/exchange",
-        origin.trim_end_matches('/')
-    )) else {
+/// What a handoff callback (loopback or deep link) carried.
+#[derive(Debug, PartialEq, Eq)]
+struct Callback {
+    /// The state we put in the callback path (loopback) or that the app echoed.
+    state: String,
+    token: String,
+    origin: String,
+    /// A `state` query parameter, when the app echoed one (it must match).
+    echoed_state: Option<String>,
+}
+
+/// Parse the loopback request target `/callback/<state>?token=…&origin=…[&state=…]`.
+/// Anything else (another path, no state, no token, no origin) is None.
+fn parse_loopback_target(target: &str) -> Option<Callback> {
+    let u = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
+    let state = u.path().strip_prefix("/callback/")?.to_string();
+    if state.is_empty() || state.contains('/') {
+        return None;
+    }
+    let (mut token, mut origin, mut echoed_state) = (None, None, None);
+    for (k, v) in u.query_pairs() {
+        match k.as_ref() {
+            "token" => token = Some(v.into_owned()),
+            "origin" => origin = Some(v.into_owned()),
+            "state" => echoed_state = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    Some(Callback { state, token: token?, origin: origin?, echoed_state })
+}
+
+/// Parse the deep-link FALLBACK `planetafoods://auth?token=…&origin=…&state=…`.
+/// Only apps that echo `state` can complete a sign-in this way.
+fn parse_deep_link(url: &Url) -> Option<Callback> {
+    if url.scheme() != "planetafoods" || url.host_str() != Some("auth") {
+        return None;
+    }
+    let (mut token, mut origin, mut state) = (None, None, None);
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "token" => token = Some(v.into_owned()),
+            "origin" => origin = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    let state: String = state?;
+    Some(Callback { echoed_state: Some(state.clone()), state, token: token?, origin: origin? })
+}
+
+/// Is this callback for the sign-in `login` and from its host? The state must
+/// be ours (looked up by the caller), an echoed state must match it, and the
+/// origin must be exactly `https://<the host we asked>`. No fallback host.
+fn callback_matches(cb: &Callback, login_host: &str) -> bool {
+    if cb.echoed_state.as_deref().is_some_and(|s| s != cb.state) {
+        return false;
+    }
+    cb.origin.trim_end_matches('/') == format!("https://{login_host}")
+}
+
+/// A redemption waiting for its landing page (the app's token-less exchange
+/// page) to load (managed state): which webview, which origin, how, the ticket
+/// and the verifier.
+struct LandingRedeem {
+    label: String,
+    origin: String,
+    redeem: Redeem,
+    token: String,
+    verifier: String,
+    created: Instant,
+}
+
+#[derive(Default)]
+struct PendingRedeem(Mutex<Option<LandingRedeem>>);
+
+/// The page the webview opens on the app's origin before the POST: the
+/// exchange endpoint itself, without a token (every app answers it with its
+/// plain 401 page and sets nothing).
+const EXCHANGE_PATH: &str = "/api/desktop-auth/exchange";
+
+/// Redeem a handoff ticket (minted by `login.host`) into the app's active tab:
+/// bring the window to the front, then
+///  - PostWithVerifier / GetWithVerifier: open `https://<host>/api/desktop-auth/exchange`
+///    (no token) and, once it has loaded (`on_page_load` -> `finish_landing_redeem`),
+///    redeem from that page with the verifier: a POST with the header, or a
+///    `fetch` GET with `?code_verifier=` AND the header;
+///  - GetDirect: navigate to `https://<host>/api/desktop-auth/exchange?token=…`
+///    as before (`location.replace`, so it never lands in history).
+/// Either way the server sets the session cookie IN THIS WEBVIEW and lands on `/`.
+/// Only ever the host this sign-in was started for, over https.
+fn redeem_into_app(app: &AppHandle, login: &PendingLogin, token: &str) {
+    let origin = format!("https://{}", login.host);
+    let Ok(mut exchange) = Url::parse(&format!("{origin}{EXCHANGE_PATH}")) else {
         return;
     };
-    exchange.query_pairs_mut().append_pair("token", token);
-
-    let host_ok = exchange
-        .host_str()
-        .map(|h| {
-            let h = h.trim_end_matches('.').to_ascii_lowercase();
-            h == "planet-a-foods.com" || h.ends_with(".planet-a-foods.com")
-        })
-        .unwrap_or(false);
-    if exchange.scheme() != "https" || !host_ok {
-        return;
-    }
 
     // Bring the app forward so the user lands back in it after the browser step.
     if let Some(win) = app.get_window("main") {
@@ -183,82 +372,141 @@ fn redeem_into_app(app: &AppHandle, token: &str, origin: &str) {
         let _ = win.set_focus();
     }
 
-    if let Some(view) = active_content_webview(app) {
-        if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
-            let _ = view.eval(&format!("window.location.replace({js_url});"));
-        }
+    let Some(view) = active_content_webview(app) else {
+        return;
+    };
+    if login.redeem == Redeem::GetDirect {
+        exchange.query_pairs_mut().append_pair("token", token);
+    } else {
+        *app.state::<PendingRedeem>().0.lock().unwrap() = Some(LandingRedeem {
+            label: view.label().to_string(),
+            origin: origin.clone(),
+            redeem: login.redeem,
+            token: token.to_string(),
+            verifier: login.verifier.clone(),
+            created: Instant::now(),
+        });
+    }
+    if let Ok(js_url) = serde_json::to_string(exchange.as_str()) {
+        let _ = view.eval(&format!("window.location.replace({js_url});"));
     }
 }
 
-/// Deep-link FALLBACK path: `planetafoods://auth?token=…&origin=…`. Used only
-/// when the loopback server couldn't bind. Parses and delegates to `redeem_into_app`.
-fn handle_deep_link(app: &AppHandle, url: &Url) {
-    if url.scheme() != "planetafoods" || url.host_str() != Some("auth") {
-        return;
-    }
-    let mut token: Option<String> = None;
-    let mut origin: Option<String> = None;
-    for (k, v) in url.query_pairs() {
-        match k.as_ref() {
-            "token" => token = Some(v.into_owned()),
-            "origin" => origin = Some(v.into_owned()),
-            _ => {}
+/// `on_page_load` (Finished) of a content webview: if a redemption is waiting
+/// for exactly this webview, this origin and the token-less exchange page, run
+/// it from this page now: the POST with the verifier header (same origin: no
+/// CORS, the app's CSRF check passes, and the header can't come from any other
+/// site), or the same-origin `fetch` GET with the verifier in the URL and the
+/// header. Expires after a minute.
+fn finish_landing_redeem(app: &AppHandle, webview: &tauri::webview::Webview<Wry>, url: &Url) {
+    let pending = {
+        let state = app.state::<PendingRedeem>();
+        let mut slot = state.0.lock().unwrap();
+        match slot.as_ref() {
+            Some(p) if p.created.elapsed() > Duration::from_secs(60) => {
+                *slot = None;
+                return;
+            }
+            Some(p)
+                if p.label == webview.label()
+                    && url.origin().ascii_serialization() == p.origin
+                    && url.path() == EXCHANGE_PATH
+                    && url.query().is_none() => {}
+            _ => return,
         }
+        slot.take()
+    };
+    let Some(p) = pending else { return };
+    let (Ok(token), Ok(verifier)) = (serde_json::to_string(&p.token), serde_json::to_string(&p.verifier)) else {
+        return;
+    };
+    // Both modes run from THIS page (same origin): no CORS, the app's CSRF and
+    // site checks pass, and the header can't come from any other site. The
+    // response's Set-Cookie applies to the webview; then the page goes to "/".
+    let request = if p.redeem == Redeem::GetWithVerifier {
+        format!(
+            r#"fetch("{EXCHANGE_PATH}?token=" + encodeURIComponent({token}) + "&code_verifier=" + encodeURIComponent({verifier}), {{
+    method: "GET", credentials: "same-origin", cache: "no-store",
+    headers: {{ "X-Desktop-Code-Verifier": {verifier} }}
+  }})"#
+        )
+    } else {
+        format!(
+            r#"fetch("{EXCHANGE_PATH}", {{
+    method: "POST", credentials: "same-origin", cache: "no-store",
+    headers: {{ "Content-Type": "application/x-www-form-urlencoded", "X-Desktop-Code-Verifier": {verifier} }},
+    body: "token=" + encodeURIComponent({token})
+  }})"#
+        )
+    };
+    let script = format!(
+        r#"(function(){{
+  try {{ document.title = "Signing you in…"; document.body.textContent = "Signing you in…"; }} catch (e) {{}}
+  var failed = function(){{ try {{ document.body.textContent = "Sign-in failed. Please try again."; }} catch (e) {{}} }};
+  {request}.then(function(r){{ if (r.ok) {{ window.location.replace("/"); }} else {{ failed(); }} }}, failed);
+}})();"#
+    );
+    let _ = webview.eval(&script);
+}
+
+/// Deep-link FALLBACK path: `planetafoods://auth?token=…&origin=…&state=…`.
+/// Used only when the loopback server couldn't bind.
+fn handle_deep_link(app: &AppHandle, url: &Url) {
+    if let Some(cb) = parse_deep_link(url) {
+        accept_callback(app, cb);
     }
-    let Some(token) = token else { return };
-    let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
-    redeem_into_app(app, &token, &origin);
 }
 
 /// Handle one loopback HTTP connection. The system browser hits
-/// `http://127.0.0.1:<port>/callback?token=…&origin=…` (a plain http redirect it
-/// always follows — no custom scheme, so this works even on quarantined installs
-/// where `planetafoods://` is unregistered). We parse the token, reply with a
-/// tiny "you can close this tab" page, then redeem into the app.
+/// `http://127.0.0.1:<port>/callback/<state>?token=…&origin=…` (a plain http
+/// redirect it always follows — no custom scheme, so this works even on
+/// quarantined installs where `planetafoods://` is unregistered). Only a
+/// callback for a sign-in we started, from the host we asked, is accepted;
+/// everything else gets a 404 and changes nothing.
 fn handle_loopback(app: &AppHandle, stream: &mut std::net::TcpStream) {
     let mut buf = [0u8; 8192];
     let n = stream.read(&mut buf).unwrap_or(0);
     let req = String::from_utf8_lossy(&buf[..n]);
-    // First request line: "GET /callback?token=…&origin=… HTTP/1.1".
-    let path = req
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("");
+    // First request line: "GET /callback/<state>?token=…&origin=… HTTP/1.1".
+    let mut parts = req.lines().next().unwrap_or("").split_whitespace();
+    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
 
-    let mut token: Option<String> = None;
-    let mut origin: Option<String> = None;
-    if path.starts_with("/callback") {
-        if let Ok(u) = Url::parse(&format!("http://127.0.0.1{path}")) {
-            for (k, v) in u.query_pairs() {
-                match k.as_ref() {
-                    "token" => token = Some(v.into_owned()),
-                    "origin" => origin = Some(v.into_owned()),
-                    _ => {}
-                }
-            }
-        }
-    }
+    let accepted = method == "GET"
+        && parse_loopback_target(target).is_some_and(|cb| {
+            // The redemption is queued on the main thread; the browser gets its page now.
+            accept_callback(app, cb)
+        });
 
-    let ok = token.is_some();
-    let body = if ok {
+    let body = if accepted {
         "<!doctype html><meta charset=utf-8><title>Signed in</title><body style=\"font-family:-apple-system,sans-serif;background:#09090f;color:#e9e9f2;display:flex;align-items:center;justify-content:center;height:100vh;margin:0\"><p>Signed in — you can close this tab and return to Planet A Foods.</p></body>"
     } else {
         "<!doctype html><meta charset=utf-8><body>Not found</body>"
     };
     let resp = format!(
-        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        if ok { "200 OK" } else { "404 Not Found" },
+        "HTTP/1.1 {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{}",
+        if accepted { "200 OK" } else { "404 Not Found" },
         body.len(),
         body
     );
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
+}
 
-    if let Some(token) = token {
-        let origin = origin.unwrap_or_else(|| "https://note.planet-a-foods.com".to_string());
-        redeem_into_app(app, &token, &origin);
+/// Accept a callback: only for a sign-in we started (its state, used once) and
+/// only from the host we asked. Then redeem on that host, on the main thread
+/// (webview calls belong there; the loopback server runs on its own thread).
+/// Returns whether it was accepted.
+fn accept_callback(app: &AppHandle, cb: Callback) -> bool {
+    let Some(login) = take_login(app, &cb.state) else {
+        return false;
+    };
+    if !callback_matches(&cb, login.host) {
+        return false;
     }
+    let handle = app.clone();
+    let token = cb.token;
+    let _ = app.run_on_main_thread(move || redeem_into_app(&handle, &login, &token));
+    true
 }
 
 /// One tab: its stable numeric id and its last-seen document title.
@@ -382,6 +630,7 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
     let handle_nav = app.clone();
     let handle_title = app.clone();
     let handle_newwin = app.clone();
+    let handle_load = app.clone();
 
     let builder = WebviewBuilder::new(label, url)
         .user_agent(USER_AGENT)
@@ -413,6 +662,12 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
                 }
             }
             true
+        })
+        // A redemption from the app's own origin (PostWithVerifier, GetWithVerifier) waits for its landing page.
+        .on_page_load(move |webview, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                finish_landing_redeem(&handle_load, &webview, payload.url());
+            }
         })
         // Update the pill's title from the page's document title.
         .on_document_title_changed(move |webview, title| {
@@ -780,6 +1035,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
         .manage(Mutex::new(TabManager::default()))
+        // Desktop sign-in: the sign-ins in flight (state -> host + PKCE verifier)
+        // and a POST redemption waiting for its landing page.
+        .manage(PendingLogins::default())
+        .manage(PendingRedeem::default())
         .invoke_handler(tauri::generate_handler![
             get_tabs,
             cmd_new_tab,
@@ -852,10 +1111,11 @@ pub fn run() {
                 }
             }
 
-            // Route the passkey-login deep link (FALLBACK). The system browser 302s to
-            // `planetafoods://auth?token=…&origin=…` after sign-in; redeem it
-            // into the active tab's webview. Covers both the running-app case
-            // and (via get_current) a cold start launched by the deep link.
+            // Route the passkey-login deep link (FALLBACK, only when the loopback
+            // couldn't bind). The browser opens `planetafoods://auth?token=…&origin=…&state=…`
+            // after sign-in; like the loopback, it is accepted only for a sign-in
+            // THIS process started (its state) and redeemed only on that host, so
+            // a deep link from anywhere else, or at a cold start, does nothing.
             let dl_handle = handle.clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
@@ -876,4 +1136,112 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pkce_challenge_is_base64url_sha256() {
+        // Cross-checked with Node: crypto.createHash("sha256").update(v).digest("base64url").
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mJ92K1qUfI4oYHN1pNFqHf5RjhqhIc"),
+            "Ck6D4yzCW3mvCkNNBygfiZg4eSPdEvJIiQaNr4npuHo"
+        );
+    }
+
+    #[test]
+    fn random_tokens_are_43_chars_of_unreserved_and_differ() {
+        let a = random_token();
+        let b = random_token();
+        assert_eq!(a.len(), 43);
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn host_table() {
+        assert_eq!(desktop_auth_host("supplychain.planet-a-foods.com"), Some(("supplychain.planet-a-foods.com", Redeem::PostWithVerifier)));
+        assert_eq!(desktop_auth_host("SupplyChain.planet-a-foods.com."), Some(("supplychain.planet-a-foods.com", Redeem::PostWithVerifier)));
+        assert_eq!(desktop_auth_host("note.planet-a-foods.com").map(|h| h.1), Some(Redeem::GetWithVerifier));
+        assert_eq!(desktop_auth_host("finance.planet-a-foods.com").map(|h| h.1), Some(Redeem::GetDirect));
+        assert_eq!(desktop_auth_host("feedback.planet-a-foods.com").map(|h| h.1), Some(Redeem::PostWithVerifier));
+        assert_eq!(desktop_auth_host("training.planet-a-foods.com").map(|h| h.1), Some(Redeem::PostWithVerifier));
+        assert!(desktop_auth_host("evil-supplychain.planet-a-foods.com").is_none());
+        assert!(desktop_auth_host("supplychain.planet-a-foods.com.evil.example").is_none());
+        assert!(desktop_auth_host("hub.planet-a-foods.com").is_none());
+    }
+
+    #[test]
+    fn desktop_login_url_carries_state_and_pkce_only_for_post_hosts() {
+        let u = desktop_login_url("supplychain.planet-a-foods.com", Redeem::PostWithVerifier, 53111, "STATE", "VERIFIER").unwrap();
+        let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+        assert_eq!(u.as_str().split('?').next(), Some("https://supplychain.planet-a-foods.com/desktop-login"));
+        assert_eq!(q["cb"], "http://127.0.0.1:53111/callback/STATE");
+        assert_eq!(q["state"], "STATE");
+        assert_eq!(q["code_challenge"], pkce_challenge("VERIFIER"));
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert!(!u.as_str().contains("VERIFIER"), "the verifier never leaves the app");
+
+        let note = desktop_login_url("note.planet-a-foods.com", Redeem::GetWithVerifier, 53111, "STATE", "VERIFIER").unwrap();
+        let q: HashMap<String, String> = note.query_pairs().into_owned().collect();
+        assert_eq!(q["cb"], "http://127.0.0.1:53111/callback/STATE");
+        assert_eq!(q["code_challenge"], pkce_challenge("VERIFIER"), "note gets PKCE too (option b)");
+        assert!(!note.as_str().contains("VERIFIER"));
+
+        let legacy = desktop_login_url("freight.planet-a-foods.com", Redeem::GetDirect, 53111, "STATE", "VERIFIER").unwrap();
+        let q: HashMap<String, String> = legacy.query_pairs().into_owned().collect();
+        assert_eq!(q["cb"], "http://127.0.0.1:53111/callback/STATE");
+        assert!(!q.contains_key("code_challenge"));
+
+        let no_loopback = desktop_login_url("feedback.planet-a-foods.com", Redeem::PostWithVerifier, 0, "STATE", "V").unwrap();
+        assert!(!no_loopback.query_pairs().any(|(k, _)| k == "cb"));
+    }
+
+    #[test]
+    fn loopback_target_needs_the_state_path_a_token_and_an_origin() {
+        let cb = parse_loopback_target("/callback/STATE123?token=T&origin=https%3A%2F%2Fsupplychain.planet-a-foods.com&state=STATE123").unwrap();
+        assert_eq!(cb.state, "STATE123");
+        assert_eq!(cb.token, "T");
+        assert_eq!(cb.origin, "https://supplychain.planet-a-foods.com");
+        assert_eq!(cb.echoed_state.as_deref(), Some("STATE123"));
+        for bad in [
+            "/callback?token=T&origin=https%3A%2F%2Fnote.planet-a-foods.com",
+            "/callback/?token=T&origin=x",
+            "/callback/S/extra?token=T&origin=x",
+            "/callback/S?origin=x",
+            "/callback/S?token=T",
+            "/other/S?token=T&origin=x",
+            "/favicon.ico",
+        ] {
+            assert!(parse_loopback_target(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn callback_must_come_from_the_host_we_asked_with_our_state() {
+        let ok = Callback { state: "S".into(), token: "T".into(), origin: "https://supplychain.planet-a-foods.com".into(), echoed_state: None };
+        assert!(callback_matches(&ok, "supplychain.planet-a-foods.com"));
+        assert!(callback_matches(&Callback { origin: "https://supplychain.planet-a-foods.com/".into(), ..ok_clone(&ok) }, "supplychain.planet-a-foods.com"));
+        assert!(!callback_matches(&ok, "note.planet-a-foods.com"), "no other host, no note fallback");
+        for origin in ["http://supplychain.planet-a-foods.com", "https://evil.example", "https://supplychain.planet-a-foods.com.evil.example", ""] {
+            assert!(!callback_matches(&Callback { origin: origin.into(), ..ok_clone(&ok) }, "supplychain.planet-a-foods.com"), "{origin}");
+        }
+        assert!(!callback_matches(&Callback { echoed_state: Some("OTHER".into()), ..ok_clone(&ok) }, "supplychain.planet-a-foods.com"));
+        assert!(callback_matches(&Callback { echoed_state: Some("S".into()), ..ok_clone(&ok) }, "supplychain.planet-a-foods.com"));
+    }
+
+    #[test]
+    fn deep_link_needs_a_state() {
+        let with = Url::parse("planetafoods://auth?token=T&origin=https%3A%2F%2Ffeedback.planet-a-foods.com&state=S").unwrap();
+        assert_eq!(parse_deep_link(&with).map(|c| c.state), Some("S".to_string()));
+        let without = Url::parse("planetafoods://auth?token=T&origin=https%3A%2F%2Fnote.planet-a-foods.com").unwrap();
+        assert!(parse_deep_link(&without).is_none());
+        assert!(parse_deep_link(&Url::parse("planetafoods://other?token=T&origin=x&state=S").unwrap()).is_none());
+    }
+
+    fn ok_clone(c: &Callback) -> Callback {
+        Callback { state: c.state.clone(), token: c.token.clone(), origin: c.origin.clone(), echoed_state: c.echoed_state.clone() }
+    }
 }
