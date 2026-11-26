@@ -37,6 +37,7 @@ How each app redeems today (checked against their code on 2026-11-14):
 | feedback | feedback | POST + header, PKCE | yes: `validLoopbackCb` checks scheme, host and port only |
 | paf_training | training | POST + header, PKCE | yes: same |
 | paf_supplychain | supplychain | POST + header, PKCE (required) | yes: scheme, host, port, no userinfo or fragment |
+| paf_operations (0.2.8+) | operations | POST + header, PKCE (required) | yes: same code as supplychain |
 | paf_note | note | GET + verifier (URL and header), PKCE | yes: scheme, host, port only; `cb` rides through `callbackUrl` |
 | paf_freight | freight | direct GET, no PKCE | yes: scheme, host, port, no userinfo; `cb` rides through `next` (`safeNextPath`) |
 | finance (paf-finance-tool) | finance | direct GET, no PKCE | yes: `valid_cb` checks scheme, host, port, no userinfo; `with_params` keeps the path |
@@ -54,3 +55,17 @@ When an app's server starts accepting the header, change its entry to
 paf_supplychain (PKCE required) and, once paf_note's hardening PR is live, not
 to paf_note either (it only accepts a same-origin redemption), so roll out 0.2.7
 first.
+
+**paf_operations (0.2.8).** Same server code as paf_supplychain. Its server
+treats 0.2.8 as the first build that can sign in (0.2.7 doesn't route its host
+to the browser) and shows "please update to 0.2.8 or later" to older builds.
+Its re-sign-ins (after a deploy or an unlock) try Google silently
+(`prompt=none` + `login_hint`) when the app opened `/desktop-login` and the
+browser confirmed a desktop sign-in there before; the one confirming click
+stays. Nothing in the app is needed for that: the OS opens the URL as a fresh
+navigation (`Sec-Fetch-Site: none`).
+
+**No browser-tab storms (0.2.8).** A second automatic sign-in for the same host
+within 3 seconds opens no new browser tab (a page that keeps redirecting to its
+sign-in); the menu's **Sign in via browser** always opens one. If a redemption
+fails, the tab shows "Sign-in failed or expired" with a **Try again** link.

@@ -3,8 +3,8 @@
 The **Planet A Foods app hub** (<https://hub.planet-a-foods.com/>) as a desktop
 app. It opens the hub in its own window with tabs, and keeps you in one app as you
 move between the internal tools: QOaroma, paf_note, paf_feedback, paf_training,
-paf_commodity, paf_coa, finance, paf_force (sales), paf_freight and
-paf_supplychain. Same logins and same data as in the browser, which keeps working
+paf_commodity, paf_coa, finance, paf_force (sales), paf_freight,
+paf_supplychain and paf_operations. Same logins and same data as in the browser, which keeps working
 as before.
 
 It needs an internet connection: the app is a window onto the live apps, not an
@@ -15,11 +15,11 @@ offline copy.
 ## Install and first launch
 
 Get the installer from the [Releases](../../releases) page (latest version at the
-top). File names below are for the current version, 0.2.6.
+top). File names below are for the current version, 0.2.8.
 
 ### Mac
 
-1. Download **`Planet.A.Foods_0.2.6_universal.dmg`** (works on Apple Silicon and Intel Macs).
+1. Download **`Planet.A.Foods_0.2.8_universal.dmg`** (works on Apple Silicon and Intel Macs).
 2. Open it and drag **Planet A Foods** into **Applications**.
 3. **First time only:** open **Terminal** (press ⌘ Space, type *Terminal*, press
    Enter), paste this line and press Enter:
@@ -38,19 +38,19 @@ opened"* or *"Apple could not verify…"*. The app isn't damaged; run step 3 and
 open it again. ([`signing/install-macos.sh`](signing/install-macos.sh) does the
 same thing.)
 
-**Installed by IT:** if IT installs **`Planet-A-Foods_0.2.6_universal.pkg`** for
+**Installed by IT:** if IT installs **`Planet-A-Foods_0.2.8_universal.pkg`** for
 you via device management, skip step 3; there's no prompt.
 
 ### Windows
 
-1. Download **`Planet.A.Foods_0.2.6_x64-setup.exe`**.
+1. Download **`Planet.A.Foods_0.2.8_x64-setup.exe`**.
 2. Run it, then open **Planet A Foods** from the Start menu.
 
 If Windows shows **"Windows protected your PC"** (SmartScreen), click **More info**
 → **Run anyway**. You only see this when installing. It appears because our
 installers aren't signed with a commercial certificate. If IT installs the app
 for you, you won't see it.
-(`Planet.A.Foods_0.2.6_x64_en-US.msi` is the same app packaged for IT deployment.)
+(`Planet.A.Foods_0.2.8_x64_en-US.msi` is the same app packaged for IT deployment.)
 
 ## Signing in
 
@@ -65,7 +65,9 @@ The hub page itself needs no sign-in. When you open an app that does:
 
 You stay signed in, as in the browser. Each app signs in once. This works for
 QOaroma, paf_note, paf_feedback, paf_commodity, paf_coa, finance, paf_training,
-paf_freight and paf_force (sales). paf_supplychain follows in the next version.
+paf_freight, paf_force (sales), paf_supplychain and (from 0.2.8) paf_operations.
+After an update of an app, you sign in to it once more; if your browser is still
+signed in to Google, that is one click on "Continue in the desktop app".
 
 Why the detour: Google doesn't allow sign-in inside apps like this one, and your
 browser has your passwords and passkeys.
@@ -94,7 +96,7 @@ The app doesn't update itself. When a new version is announced:
   version.
 
 You normally stay signed in across updates. The installer file names contain the
-version number, e.g. `Planet.A.Foods_0.2.6_universal.dmg`.
+version number, e.g. `Planet.A.Foods_0.2.8_universal.dmg`.
 
 ---
 
@@ -133,7 +135,7 @@ Releases are built in GitHub Actions; no local Rust toolchain is needed.
 
 1. Bump `version` in `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`;
    merge to `main`.
-2. Tag and push: `git tag v0.2.7 && git push origin v0.2.7`.
+2. Tag and push: `git tag v0.2.8 && git push origin v0.2.8`.
 
 The [`Release` workflow](.github/workflows/release.yml) builds and attaches
 `Planet.A.Foods_<version>_universal.dmg`, `Planet-A-Foods_<version>_universal.pkg`
