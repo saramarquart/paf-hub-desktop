@@ -106,7 +106,9 @@ enum Redeem {
 /// how each redeems. Add a host here once its server side ships the handoff.
 /// paf_note was proven first (v0.2.1); the rest shipped their server side on
 /// 2026-08-26; paf_supplychain in v0.2.7 (its server side must be live on
-/// production before this build ships: it requires PKCE).
+/// production before this build ships: it requires PKCE); paf_operations in
+/// v0.2.8 (same server code as supplychain: PKCE required, and its server
+/// shows "please update" to 0.2.7 and older, which don't route it here).
 const DESKTOP_AUTH_HOSTS: &[(&str, Redeem)] = &[
     ("note.planet-a-foods.com", Redeem::GetWithVerifier),  // paf_note
     ("feedback.planet-a-foods.com", Redeem::PostWithVerifier), // feedback
@@ -118,6 +120,7 @@ const DESKTOP_AUTH_HOSTS: &[(&str, Redeem)] = &[
     ("freight.planet-a-foods.com", Redeem::GetDirect),     // paf_freight
     ("sales.planet-a-foods.com", Redeem::GetDirect),       // paf_sales (PAForce)
     ("supplychain.planet-a-foods.com", Redeem::PostWithVerifier), // paf_supplychain
+    ("operations.planet-a-foods.com", Redeem::PostWithVerifier), // paf_operations
 ];
 
 /// User agent for every content webview: WKWebView's default string plus a
@@ -170,6 +173,11 @@ struct PendingLogins(Mutex<HashMap<String, PendingLogin>>);
 
 /// How long a started sign-in may take in the browser (Google, passkey, the click).
 const LOGIN_TTL: Duration = Duration::from_secs(10 * 60);
+/// A second sign-in for the same host within this window opens no new browser
+/// tab: a page that keeps redirecting to its sign-in (a reload, a redirect
+/// chain) must not open a browser tab per redirect. The first one is still
+/// running in the browser; the menu's "Sign in via browser" always works.
+const LOGIN_DEBOUNCE: Duration = Duration::from_secs(3);
 /// At most this many sign-ins in flight; the oldest is dropped beyond it.
 const MAX_PENDING_LOGINS: usize = 8;
 
@@ -186,13 +194,22 @@ fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// Remember a new sign-in for `host`; returns its state and the verifier.
-fn begin_login(app: &AppHandle, host: &'static str, redeem: Redeem) -> (String, String) {
+/// Was a sign-in for `host` started within LOGIN_DEBOUNCE?
+fn recently_started(map: &HashMap<String, PendingLogin>, host: &str) -> bool {
+    map.values().any(|p| p.host == host && p.created.elapsed() < LOGIN_DEBOUNCE)
+}
+
+/// Remember a new sign-in for `host`; returns its state and the verifier, or
+/// None when one for this host started within LOGIN_DEBOUNCE (unless `force`).
+fn begin_login(app: &AppHandle, host: &'static str, redeem: Redeem, force: bool) -> Option<(String, String)> {
     let state = random_token();
     let verifier = random_token();
     let logins = app.state::<PendingLogins>();
     let mut map = logins.0.lock().unwrap();
     map.retain(|_, p| p.created.elapsed() < LOGIN_TTL);
+    if !force && recently_started(&map, host) {
+        return None;
+    }
     while map.len() >= MAX_PENDING_LOGINS {
         let oldest = map.iter().min_by_key(|(_, p)| p.created).map(|(k, _)| k.clone());
         match oldest {
@@ -206,7 +223,7 @@ fn begin_login(app: &AppHandle, host: &'static str, redeem: Redeem) -> (String, 
         state.clone(),
         PendingLogin { host, redeem, verifier: verifier.clone(), created: Instant::now() },
     );
-    (state, verifier)
+    Some((state, verifier))
 }
 
 /// Take (use up) the sign-in for `state`, if it exists and isn't stale.
@@ -243,12 +260,15 @@ fn desktop_login_url(host: &str, redeem: Redeem, port: u16, state: &str, verifie
 /// passkey sign-in, then the server redirects to our loopback callback (or,
 /// failing that, `planetafoods://auth?…`), which we accept only for THIS
 /// sign-in (its state) and redeem only on THIS host.
-fn open_browser_login(app: &AppHandle, host: &str) {
+/// `force` (the menu item): always open, even right after another start.
+fn open_browser_login(app: &AppHandle, host: &str, force: bool) {
     let Some((host, redeem)) = desktop_auth_host(host) else {
         return;
     };
     let port = { app.state::<LoopbackPort>().0 };
-    let (state, verifier) = begin_login(app, host, redeem);
+    let Some((state, verifier)) = begin_login(app, host, redeem, force) else {
+        return;
+    };
     if let Some(url) = desktop_login_url(host, redeem, port, &state, &verifier) {
         let _ = app.opener().open_url(url.as_str(), None::<String>);
     }
@@ -262,7 +282,7 @@ fn browser_login_active(app: &AppHandle) {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .filter(|h| supports_desktop_auth(h))
         .unwrap_or_else(|| DESKTOP_AUTH_HOSTS[0].0.to_string());
-    open_browser_login(app, &host);
+    open_browser_login(app, &host, true);
 }
 
 /// Ephemeral port of the loopback OAuth-callback server (managed state). 0 means
@@ -442,7 +462,12 @@ fn finish_landing_redeem(app: &AppHandle, webview: &tauri::webview::Webview<Wry>
     let script = format!(
         r#"(function(){{
   try {{ document.title = "Signing you in…"; document.body.textContent = "Signing you in…"; }} catch (e) {{}}
-  var failed = function(){{ try {{ document.body.textContent = "Sign-in failed. Please try again."; }} catch (e) {{}} }};
+  var failed = function(){{ try {{
+    document.title = "Sign-in failed";
+    document.body.textContent = "Sign-in failed or expired. ";
+    var a = document.createElement("a"); a.href = "/"; a.textContent = "Try again";
+    document.body.appendChild(a);
+  }} catch (e) {{}} }};
   {request}.then(function(r){{ if (r.ok) {{ window.location.replace("/"); }} else {{ failed(); }} }}, failed);
 }})();"#
     );
@@ -656,7 +681,7 @@ fn create_tab(app: &AppHandle, url: WebviewUrl) -> tauri::Result<u32> {
                     if supports_desktop_auth(host)
                         && matches!(url.path(), "/signin" | "/desktop-login")
                     {
-                        open_browser_login(&handle_nav, host);
+                        open_browser_login(&handle_nav, host, false);
                         return false;
                     }
                 }
@@ -1171,6 +1196,35 @@ mod tests {
         assert!(desktop_auth_host("evil-supplychain.planet-a-foods.com").is_none());
         assert!(desktop_auth_host("supplychain.planet-a-foods.com.evil.example").is_none());
         assert!(desktop_auth_host("hub.planet-a-foods.com").is_none());
+        // paf_operations (0.2.8): same server code as supplychain.
+        assert_eq!(desktop_auth_host("operations.planet-a-foods.com"), Some(("operations.planet-a-foods.com", Redeem::PostWithVerifier)));
+        assert!(desktop_auth_host("operations.planet-a-foods.com.evil.example").is_none());
+    }
+
+    #[test]
+    fn our_apps_stay_in_window_and_external_saas_does_not() {
+        // The hub tile https://operations.planet-a-foods.com must load in the app (and its
+        // /signin go through DESKTOP_AUTH_HOSTS), never be handed to the browser as SaaS.
+        for host in ["operations.planet-a-foods.com", "supplychain.planet-a-foods.com", "hub.planet-a-foods.com"] {
+            assert!(!is_external_host(host), "{host}");
+        }
+        for host in ["forplaneta.ariadne.cloud", "app.getmoss.com", "planetafoods.personio.com"] {
+            assert!(is_external_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn a_redirect_storm_opens_one_browser_sign_in_per_host() {
+        let mut map = HashMap::new();
+        assert!(!recently_started(&map, "operations.planet-a-foods.com"));
+        map.insert("S".to_string(), PendingLogin { host: "operations.planet-a-foods.com", redeem: Redeem::PostWithVerifier, verifier: "V".into(), created: Instant::now() });
+        assert!(recently_started(&map, "operations.planet-a-foods.com"));
+        assert!(!recently_started(&map, "supplychain.planet-a-foods.com"), "per host");
+        let old = Instant::now().checked_sub(LOGIN_DEBOUNCE + Duration::from_millis(10));
+        if let Some(created) = old {
+            map.insert("S".to_string(), PendingLogin { host: "operations.planet-a-foods.com", redeem: Redeem::PostWithVerifier, verifier: "V".into(), created });
+            assert!(!recently_started(&map, "operations.planet-a-foods.com"));
+        }
     }
 
     #[test]

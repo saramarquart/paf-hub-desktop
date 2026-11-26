@@ -5,11 +5,11 @@ Tabs für alle internen Tools. Gleiche Logins, gleiche Daten wie im Browser. Die
 App braucht eine Internetverbindung. *English: [README.md](README.md).*
 
 Den Installer gibt es auf der Seite [Releases](../../releases) (neueste Version
-oben). Die Dateinamen unten gelten für Version 0.2.6.
+oben). Die Dateinamen unten gelten für Version 0.2.8.
 
 ## Mac
 
-1. **`Planet.A.Foods_0.2.6_universal.dmg`** herunterladen (für Apple-Silicon- und Intel-Macs).
+1. **`Planet.A.Foods_0.2.8_universal.dmg`** herunterladen (für Apple-Silicon- und Intel-Macs).
 2. Öffnen und **Planet A Foods** in **Programme** ziehen.
 3. **Nur beim ersten Mal:** **Terminal** öffnen (⌘ Leertaste, *Terminal*, Enter),
    diese Zeile einfügen und Enter drücken:
@@ -26,11 +26,11 @@ Ohne Schritt 3 meldet macOS, die App *„ist beschädigt und kann nicht geöffne
 werden"* oder *„Apple konnte nicht überprüfen …"*. Sie ist nicht beschädigt. Der
 Grund: Wir lassen die App nicht kostenpflichtig von Apple beglaubigen. Schritt 3
 ausführen und die App erneut öffnen. Installiert die IT die App per
-Geräteverwaltung (**`Planet-A-Foods_0.2.6_universal.pkg`**), entfällt Schritt 3.
+Geräteverwaltung (**`Planet-A-Foods_0.2.8_universal.pkg`**), entfällt Schritt 3.
 
 ## Windows
 
-1. **`Planet.A.Foods_0.2.6_x64-setup.exe`** herunterladen.
+1. **`Planet.A.Foods_0.2.8_x64-setup.exe`** herunterladen.
 2. Ausführen, dann **Planet A Foods** über das Startmenü öffnen.
 
 Erscheint **„Der Computer wurde durch Windows geschützt"** (SmartScreen): auf
@@ -49,8 +49,10 @@ Die Hub-Seite selbst braucht keine Anmeldung. Öffnest du eine App, die eine bra
    kannst du schließen.
 
 Jede App meldest du einmal an. Das gilt für QOaroma, paf_note, paf_feedback,
-paf_commodity, paf_coa, finance, paf_training, paf_freight und paf_force (Sales);
-paf_supplychain folgt mit der nächsten Version. Warum der Umweg: Google erlaubt die
+paf_commodity, paf_coa, finance, paf_training, paf_freight, paf_force (Sales),
+paf_supplychain und (ab 0.2.8) paf_operations. Nach einem Update einer App meldest
+du dich dort einmal neu an; ist dein Browser noch bei Google angemeldet, ist das ein
+Klick auf „Continue in the desktop app“. Warum der Umweg: Google erlaubt die
 Anmeldung nicht innerhalb solcher Apps, und im Browser hast du deine Passwörter und
 Passkeys.
 

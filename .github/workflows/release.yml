@@ -83,7 +83,7 @@ jobs:
             **Planet A Foods**: the app hub as a desktop app. One window with tabs
             for all internal tools (QOaroma, paf_note, paf_feedback, paf_training,
             paf_commodity, paf_coa, finance, paf_force, paf_freight,
-            paf_supplychain). Sign-in runs in your web browser, then you're back
+            paf_supplychain, paf_operations). Sign-in runs in your web browser, then you're back
             in the app. Personio, Moss and Ariadne open in your browser.
 
             **Which file?**
